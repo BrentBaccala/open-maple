@@ -341,6 +341,32 @@ func isOne(v Value) bool {
 }
 
 func simplifySum(terms []Value) Value {
+	// Maple's extended-real arithmetic on +/-infinity: a sum containing +infinity
+	// absorbs every finite term -> infinity (and likewise -infinity -> -infinity).
+	// Mixing +infinity and -infinity is undefined. DT relies on this when it does
+	// element-wise list arithmetic on MultiplicativeVariables lists whose entries
+	// are `infinity` (JanetDivisorInTrees: `[infinity,infinity] - [0,1]` must give
+	// `[infinity,infinity]`, not `[infinity, infinity-1]`).
+	pos, neg := false, false
+	for _, t := range terms {
+		if isInfinityVal(t) {
+			if isNegInfinityVal(t) {
+				neg = true
+			} else {
+				pos = true
+			}
+		}
+	}
+	if pos || neg {
+		if pos && neg {
+			return Name{"undefined"}
+		}
+		if pos {
+			return Name{"infinity"}
+		}
+		return &Prod{[]Value{newInt(-1), Name{"infinity"}}}
+	}
+
 	var num *big.Rat
 	var rest []Value
 	for _, t := range terms {

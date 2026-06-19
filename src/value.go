@@ -304,6 +304,28 @@ func isInfinityVal(v Value) bool {
 	return false
 }
 
+// isNegInfinityVal reports whether v is Maple's -infinity, represented as the
+// product (-1)*infinity (a Prod containing the infinity name and a negative
+// rational coefficient). Plain Name{"infinity"} is +infinity.
+func isNegInfinityVal(v Value) bool {
+	p, ok := v.(*Prod)
+	if !ok {
+		return false
+	}
+	hasInf := false
+	neg := false
+	for _, f := range p.Factors {
+		if n, ok := f.(Name); ok && n.Val == "infinity" {
+			hasInf = true
+			continue
+		}
+		if r, ok := toRat(f); ok && r.Sign() < 0 {
+			neg = true
+		}
+	}
+	return hasInf && neg
+}
+
 // isUndefinedVal reports whether v is Maple's undefined.
 func isUndefinedVal(v Value) bool {
 	n, ok := v.(Name)

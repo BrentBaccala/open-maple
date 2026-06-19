@@ -181,19 +181,27 @@ func (it *Interp) checkNamedType(v Value, name string, params []*tree) (bool, er
 	case "Matrix", "matrix", "Vector", "array":
 		// not represented yet; treat as never-matching (documented gap)
 		return false, nil
-	case "equation", "`=`":
+	case "equation", "=", "`=`":
 		_, ok := v.(*Equation)
 		return ok, nil
 	case "range":
 		_, ok := v.(*Range)
 		return ok, nil
-	case "`+`":
+	// The type names `+`/`*`/`^` arrive backtick-stripped (checkType does
+	// stripBacktick on the type node), so the cases must be the bare operator
+	// strings. Same backtick-stripping pitfall as `convert(L, `+`)` in
+	// builtins.biConvert. DT's PartialDerivativeInternal branches on
+	// type(p,`+`) / type(p,`*`) / type(p,`^`); when these silently returned false
+	// the sum/product rules were skipped, so e.g. d/dy (u[0,0]-u[1,0]) fell
+	// through to a scalar `diff` of the whole sum and came back 0 — producing a
+	// zero reductor and the spurious "division by zero" in PseudoRemainder.
+	case "+", "`+`":
 		_, ok := v.(*Sum)
 		return ok, nil
-	case "`*`":
+	case "*", "`*`":
 		_, ok := v.(*Prod)
 		return ok, nil
-	case "`^`":
+	case "^", "`^`":
 		_, ok := v.(*Power)
 		return ok, nil
 	case "polynom", "ratpoly", "algebraic":

@@ -514,6 +514,14 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		_ = json.Unmarshal(r, &str)
 		return san.unsanitizeName(str), nil
 	}
+	if _, ok := m["neg_infinity"]; ok {
+		// Maple -infinity, represented as the product (-1)*infinity (matches
+		// isNegInfinityVal / the symbolic-infinity simplification in eval_ops).
+		return &Prod{[]Value{newInt(-1), Name{"infinity"}}}, nil
+	}
+	if _, ok := m["infinity"]; ok {
+		return Name{"infinity"}, nil
+	}
 	return nil, fmt.Errorf("unrecognized sage result for %s: %s", op, raw)
 }
 

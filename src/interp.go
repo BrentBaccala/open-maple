@@ -478,6 +478,16 @@ func (it *Interp) assignIndexed(lhs *tree, rhsVal Value) error {
 	}
 	idx := seqOrSingle(idxVals)
 
+	// List-element assignment: L[i] := v where L resolves to a list (or to a
+	// table/name slot holding a list). Maple lists are value types, so L[i]:=v
+	// produces a modified copy and rebinds L to it. DT relies on this in
+	// RemoveMultiplicativeVariableInSubtree:
+	//   node['MultiplicativeVariables'][indexofvar] := 0
+	// where node['MultiplicativeVariables'] is a list [infinity, infinity].
+	if handled, err := it.tryListElementAssign(base, idx, rhsVal); handled {
+		return err
+	}
+
 	tbl, err := it.resolveAssignTable(base)
 	if err != nil {
 		return err
@@ -495,6 +505,59 @@ func (it *Interp) assignIndexed(lhs *tree, rhsVal Value) error {
 	// and keeps mutation visible. (See resolveRefForStore.)
 	tbl.set(idx, it.resolveRefForStore(rhsVal))
 	return nil
+}
+
+// tryListElementAssign handles `base[i] := v` when `base` evaluates to a list.
+// Maple lists are value types: list-element assignment produces a modified copy
+// and rebinds `base` to it. We read the current list (via normal evaluation of
+// the base node), copy it with element i (1-based) replaced, and write the new
+// list back to wherever `base` lives — a plain variable, or a table slot if the
+// base is itself an indexed expression. Returns handled=false (and no error) if
+// the base does not resolve to a list, so the caller falls through to the normal
+// table path.
+func (it *Interp) tryListElementAssign(base *tree, idx, rhsVal Value) (bool, error) {
+	cur, err := it.eval(base)
+	if err != nil {
+		// Base may be an unassigned/auto-vivifying table slot; let the normal
+		// table path handle (and report) it.
+		return false, nil
+	}
+	lst, ok := it.derefTable(cur).(List)
+	if !ok {
+		return false, nil
+	}
+	bn, ok := intVal(idx)
+	if !ok || !bn.IsInt64() {
+		return false, nil
+	}
+	n := bn.Int64()
+	if n < 1 || n > int64(len(lst.Items)) {
+		// Out-of-range / non-integer index into a list isn't something DT does;
+		// defer to the normal path's error.
+		return false, nil
+	}
+	items := make([]Value, len(lst.Items))
+	copy(items, lst.Items)
+	items[n-1] = it.resolveRefForStore(rhsVal)
+	newList := List{Items: items}
+
+	switch base.group {
+	case variable:
+		it.store(stripBacktick(base.value), newList)
+		return true, nil
+	case indexNode:
+		parent, perr := it.resolveAssignTable(base.nodes[0])
+		if perr != nil {
+			return true, perr
+		}
+		idxVals, ierr := it.evalArgs(base.nodes[1:])
+		if ierr != nil {
+			return true, ierr
+		}
+		parent.set(seqOrSingle(idxVals), newList)
+		return true, nil
+	}
+	return false, nil
 }
 
 // resolveAssignTable resolves the base of an indexed assignment to a *Table,

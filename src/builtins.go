@@ -1471,22 +1471,36 @@ func biEvalf(it *Interp, args []Value) (Value, error) {
 func biTable(it *Interp, args []Value) (Value, error) {
 	t := newTable()
 	// table([k1=v1, k2=v2, ...]) or table(symmetric, [...]) etc.
+	//
+	// Each entry value goes through resolveRefForStore for the same reason the
+	// indexed-assignment path does (see assignIndexed / resolveRefForStore): a
+	// table/proc-valued RHS is a Maple reference type, but last-name-eval makes a
+	// name bound to a table/proc evaluate to the bare name. Storing that bare
+	// name into the new table drops the binding — once the constructing proc's
+	// scope is gone the name is unbound, so a later index/call falls through to an
+	// inert Func/Indexed. Concretely, CreateJanetTreesObject does
+	// `table(['Ranking'=ranking])` with the proc-local `ranking` table; without
+	// the deref the treeobject's Ranking ends up as the dangling name `ranking`,
+	// and `treeobject['Ranking']['IsDifferentialVariable'](...)` evaluates to an
+	// inert `ranking[IsDifferentialVariable](...)` instead of a boolean — tripping
+	// the "no differential variable as leader" ASSERT in InsertIntoJanetTrees.
+	set := func(k, v Value) { t.set(k, it.resolveRefForStore(v)) }
 	for _, a := range args {
 		switch x := a.(type) {
 		case List:
 			for _, e := range x.Items {
 				if eq, ok := e.(*Equation); ok {
-					t.set(eq.Lhs, eq.Rhs)
+					set(eq.Lhs, eq.Rhs)
 				}
 			}
 		case Set:
 			for _, e := range x.Items {
 				if eq, ok := e.(*Equation); ok {
-					t.set(eq.Lhs, eq.Rhs)
+					set(eq.Lhs, eq.Rhs)
 				}
 			}
 		case *Equation:
-			t.set(x.Lhs, x.Rhs)
+			set(x.Lhs, x.Rhs)
 		}
 	}
 	return t, nil

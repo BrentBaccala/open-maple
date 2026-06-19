@@ -226,6 +226,12 @@ def op_denom(req):
 def op_degree(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
+    # Maple: degree(0, ...) == -infinity (and Sage's univariate p.degree() on the
+    # zero polynomial raises a bare NotImplementedError). DT computes
+    # `p['Rank'] := degree(StandardForm(p), Leader(p))` and tests `degree(...) >= 0`,
+    # both of which want the -infinity convention for the zero polynomial.
+    if p == 0:
+        return {"neg_infinity": True}
     if len(req["args"]) >= 2 and R.ngens() > 1:
         a = req["args"][1]
         # Maple degree(p, [x,y,...]) / degree(p, {x,...}): the maximum total
@@ -494,6 +500,12 @@ def op_diff(req):
     R = make_ring(req["vars"])
     f = decode_arg(req["args"][0], R)
     x = decode_arg(xarg, R)
+    # Coerce f into the ring so constants (Sage Integer/Rational, which lack a
+    # `.derivative` method) differentiate correctly to 0. DT's
+    # PartialDerivativeInternal calls diff on constant terms once the structural
+    # type(p,`+`)/`*`/`^` checks branch correctly (e.g. diff(-1, y) for the unit
+    # factor of a -u[1,0] term).
+    f = R(f)
     return enc_poly(f.derivative(x))
 
 
