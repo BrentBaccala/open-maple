@@ -12,7 +12,38 @@ import (
 // for debugging the decomposition path.
 var traceProcs = os.Getenv("OPENMAPLE_TRACE_PROCS") != ""
 
+// probeDecomp, when set via OPENMAPLE_PROBE_DECOMP, prints DoNextStep system
+// state (Q / Finished / Inconsistent / Equations / Inequations) on entry/exit
+// — a Go-side probe for the dropped-component investigation (task 414).
+var probeDecomp = os.Getenv("OPENMAPLE_PROBE_DECOMP") != ""
+
 func stderrW() *os.File { return os.Stderr }
+
+// probeField reads a string-keyed field of a (possibly name-aliased) system
+// table for the decomposition probe, returning "<not-a-table>" / "<unset>" if
+// it cannot be read.
+func (it *Interp) probeField(sys Value, field string) string {
+	t, ok := it.resolveRefForStore(sys).(*Table)
+	if !ok {
+		return "<not-a-table:" + printValue(sys) + ">"
+	}
+	v, ok := t.get(Name{Val: field})
+	if !ok {
+		return "<unset>"
+	}
+	return printValue(it.resolveRefDeep(v))
+}
+
+func (it *Interp) probeSystem(tag string, sys Value) {
+	fmt.Fprintf(stderrW(), "[probe-decomp] %s Q=%s Fin=%s Inc=%s | Eq=%s Ineq=%s\n",
+		tag,
+		it.probeField(sys, "Q"),
+		it.probeField(sys, "Finished"),
+		it.probeField(sys, "Inconsistent"),
+		it.probeField(sys, "Equations"),
+		it.probeField(sys, "Inequations"),
+	)
+}
 
 // makeProc builds a Proc value from a procNode, capturing whether `option
 // remember` is set.
@@ -252,6 +283,11 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 	it.scope = sc
 	defer func() { it.scope = prev }()
 
+	if probeDecomp && strings.HasSuffix(p.name, "/DoNextStep") && len(args) >= 1 {
+		fmt.Fprintf(stderrW(), "[probe-decomp] === DoNextStep ENTER ===\n")
+		it.probeSystem("  in ", args[0])
+	}
+
 	var result Value = NULL()
 	if body != nil {
 		v, err := it.execBlock(body.nodes)
@@ -280,6 +316,23 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 	// returned [sys1, sys2] of local-table systems resolves too. (Same
 	// reference-semantics rationale as resolveRefForStore / evalArgs.)
 	result = it.resolveRefDeep(result)
+
+	if probeDecomp && strings.HasSuffix(p.name, "/DoNextStep") {
+		switch r := result.(type) {
+		case Seq:
+			if len(r.Items) == 0 {
+				fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: 0 new systems (NULL)\n")
+			} else {
+				fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: %d new system(s)\n", len(r.Items))
+				for i, s := range r.Items {
+					it.probeSystem(fmt.Sprintf("  out[%d]", i), s)
+				}
+			}
+		default:
+			fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: 1 new system\n")
+			it.probeSystem("  out[0]", result)
+		}
+	}
 
 	if p.hasRemember {
 		p.remember[cacheKey] = result
