@@ -105,8 +105,11 @@ body:
 // or name::type:=default.
 func (p *parser_t) parseParam() (*tree, error) {
 	param := &tree{group: paramNode}
-	// the parameter expression (name, possibly with ::type via the expr parser)
-	e, err := p.parseExpr(bpAssign) // stop before ':=' default? we want defaults too
+	// Parse the parameter expression (name, possibly with ::type) ABOVE comma
+	// precedence so the comma separating parameters terminates this parse rather
+	// than folding `x, y` into a single exprseq param. We also stop before ':='
+	// so the default value is parsed separately below.
+	e, err := p.parseExpr(bpComma)
 	if err != nil {
 		return nil, err
 	}

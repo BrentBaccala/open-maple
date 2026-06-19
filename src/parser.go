@@ -432,7 +432,10 @@ func (p *parser_t) parseLoop() (*tree, error) {
 		// loop variable (a name/expr); optional.
 		if !p.isKeyword("from") && !p.isKeyword("in") && !p.isKeyword("to") &&
 			!p.isKeyword("by") && !p.isKeyword("while") && !p.isKeyword("do") {
-			v, err := p.parseExpr(0)
+			// Parse the loop variable above relational precedence so the `in`
+			// keyword (also the membership relational operator) terminates the
+			// variable rather than being swallowed as `x in [...]`.
+			v, err := p.parseExpr(bpRange)
 			if err != nil {
 				return nil, err
 			}
