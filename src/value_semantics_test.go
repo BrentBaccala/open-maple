@@ -54,6 +54,50 @@ func TestListArithmetic(t *testing.T) {
 	}
 }
 
+// TestNestedTableAssignment: Maple table auto-vivification for nested indexed
+// assignment (t[i][j] := v), plus the rule that an unassigned entry of an
+// existing table reads as NULL. DifferentialThomas/ProlongationConsidered does
+//
+//	if p['ConsideredProlongations']=NULL then p['ConsideredProlongations']:=table([]) fi;
+//	if p['ConsideredProlongations'][x]<>true then p['ConsideredProlongations'][x]:=true; ...
+//
+// Without the NULL-read the sub-table never materialises; without nested
+// auto-vivification the `[x]:=true` write errored ("indexed assignment to
+// non-name base").
+func TestNestedTableAssignment(t *testing.T) {
+	it := NewInterp()
+	mustExec := func(code string) Value {
+		v, err := it.Exec(code)
+		if err != nil {
+			t.Fatalf("%s -> error %v", code, err)
+		}
+		return v
+	}
+	eq := func(code, want string) {
+		if got := printValue(mustExec(code)); got != want {
+			t.Errorf("%s = %q, want %q", code, got, want)
+		}
+	}
+
+	// unassigned entry of an existing table reads as NULL, while assigned() is
+	// still false (it inspects the table directly).
+	mustExec("p := table([]):")
+	eq("evalb(p['ConsideredProlongations']=NULL);", "true")
+	eq("assigned(p['ConsideredProlongations']);", "false")
+
+	// full auto-vivification of a nested indexed assignment.
+	mustExec("p['ConsideredProlongations'][x] := true:")
+	eq("p['ConsideredProlongations'][x];", "true")
+	eq("assigned(p['ConsideredProlongations']);", "true")
+	// the just-written nested key reads back; a sibling unassigned key is NULL.
+	eq("evalb(p['ConsideredProlongations'][y]=NULL);", "true")
+
+	// one-shot auto-vivification (no pre-created intermediate table).
+	mustExec("q := table([]):")
+	mustExec("q['A'][z] := 5:")
+	eq("q['A'][z];", "5")
+}
+
 // TestExtendedNumericType: type(_, extended_numeric) recognizes numeric values
 // plus infinity / -infinity / undefined. DifferentialThomas uses
 // type(v, list(extended_numeric)) to validate exponent/multi-index vectors,

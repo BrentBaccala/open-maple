@@ -466,7 +466,10 @@ func (it *Interp) resolveRefForStore(v Value) Value {
 	return v
 }
 
-// assignIndexed implements t[i] := v with auto-creation of the table.
+// assignIndexed implements t[i] := v with auto-creation of the table. The base
+// may itself be an indexed expression (t[i][j] := v); intermediate tables are
+// auto-vivified, matching Maple (e.g. ProlongationConsidered does
+// p['ConsideredProlongations'][x] := true).
 func (it *Interp) assignIndexed(lhs *tree, rhsVal Value) error {
 	base := lhs.nodes[0]
 	idxVals, err := it.evalArgs(lhs.nodes[1:])
@@ -475,29 +478,65 @@ func (it *Interp) assignIndexed(lhs *tree, rhsVal Value) error {
 	}
 	idx := seqOrSingle(idxVals)
 
-	// resolve the base to a table, auto-creating one if the name is unbound or
-	// bound to a name (Maple: assigning to t[i] auto-creates the table t).
-	name, ok := baseName(base)
-	if !ok {
-		return errUnimplemented("indexed assignment to non-name base")
+	tbl, err := it.resolveAssignTable(base)
+	if err != nil {
+		return err
 	}
-	name = stripBacktick(name)
-	cur, bound := it.lookupRaw(name)
-	var tbl *Table
-	if bound {
-		if t, isT := cur.(*Table); isT {
-			tbl = t
-		} else {
-			// bound to a non-table: Maple would error; auto-create only if name
-			return fmt.Errorf("cannot index-assign into non-table %s", name)
-		}
-	}
-	if tbl == nil {
-		tbl = newTable()
-		it.store(name, tbl)
-	}
-	tbl.set(idx, rhsVal)
+	// Resolve a table/proc Name-alias on the RHS to the underlying object before
+	// storing it into the table slot, mirroring assignTo's handling for plain
+	// names (which calls resolveRefForStore). Without this, an indexed assignment
+	// like `rankingtable['Compare'] := Compare2` (where Compare2 is a proc-local
+	// `option remember` proc) stores the bare Name{"Compare2"}; once the building
+	// proc's scope is gone that name is unbound, so a later `R['Compare'](a,b)`
+	// falls through to dispatchUnknownCall and returns an inert Func instead of a
+	// boolean. BiggestDiffVar then never updates its candidate (the inert Func is
+	// truthy under `not`), so Leader is wrong and ReduceWRTJanetTrees spins.
+	// Tables/procs are reference types in Maple, so storing the object is faithful
+	// and keeps mutation visible. (See resolveRefForStore.)
+	tbl.set(idx, it.resolveRefForStore(rhsVal))
 	return nil
+}
+
+// resolveAssignTable resolves the base of an indexed assignment to a *Table,
+// auto-creating tables as needed (Maple table auto-vivification). The base node
+// is either a plain name (t[i] := v) or a nested index (t[i][j] := v); for the
+// nested case it recurses, materialising the intermediate table slot.
+func (it *Interp) resolveAssignTable(base *tree) (*Table, error) {
+	switch base.group {
+	case variable:
+		name := stripBacktick(base.value)
+		cur, bound := it.lookupRaw(name)
+		if bound {
+			if t, isT := it.derefTable(cur).(*Table); isT {
+				return t, nil
+			}
+			return nil, fmt.Errorf("cannot index-assign into non-table %s", name)
+		}
+		tbl := newTable()
+		it.store(name, tbl)
+		return tbl, nil
+	case indexNode:
+		parent, err := it.resolveAssignTable(base.nodes[0])
+		if err != nil {
+			return nil, err
+		}
+		idxVals, err := it.evalArgs(base.nodes[1:])
+		if err != nil {
+			return nil, err
+		}
+		idx := seqOrSingle(idxVals)
+		if cur, ok := parent.get(idx); ok {
+			if t, isT := it.derefTable(cur).(*Table); isT {
+				return t, nil
+			}
+			return nil, fmt.Errorf("cannot index-assign into non-table slot")
+		}
+		tbl := newTable()
+		parent.set(idx, tbl)
+		return tbl, nil
+	default:
+		return nil, errUnimplemented("indexed assignment to non-name base")
+	}
 }
 
 // lookupRaw resolves a name to its stored value WITHOUT last-name-eval (used by

@@ -227,7 +227,25 @@ def op_degree(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     if len(req["args"]) >= 2 and R.ngens() > 1:
-        x = decode_arg(req["args"][1], R)
+        a = req["args"][1]
+        # Maple degree(p, [x,y,...]) / degree(p, {x,...}): the maximum total
+        # degree among the listed variables over all monomials of p.
+        if isinstance(a, dict) and "exprlist" in a:
+            gens = [parse_in_ring(s, R) for s in a["exprlist"]]
+            idxs = []
+            for g in gens:
+                try:
+                    idxs.append(R.gens().index(g))
+                except Exception:
+                    pass
+            if p == 0:
+                # Maple: degree of 0 is -infinity, but DT only compares via this
+                # so 0 is a safe sentinel here (no negative path is exercised).
+                return enc_int(0)
+            if not idxs:
+                return enc_int(0)
+            return enc_int(max(sum(e[i] for i in idxs) for e in p.exponents()))
+        x = decode_arg(a, R)
         return enc_int(p.degree(x))
     return enc_int(p.degree())
 

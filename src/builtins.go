@@ -1133,11 +1133,20 @@ func biConvert(it *Interp, args []Value) (Value, error) {
 			return makeSet([]Value{args[0]}), nil
 		}
 		return makeSet(items), nil
-	case "`+`":
-		items, _ := positional(args[0])
+	case "+", "`+`":
+		// convert(L, `+`): sum the operands. The backtick name `+` arrives here
+		// with backticks already stripped (Name{"+"}), so match the bare form;
+		// keep the backticked label too for safety.
+		items, ok := positional(args[0])
+		if !ok {
+			items = []Value{args[0]}
+		}
 		return simplifySum(items), nil
-	case "`*`":
-		items, _ := positional(args[0])
+	case "*", "`*`":
+		items, ok := positional(args[0])
+		if !ok {
+			items = []Value{args[0]}
+		}
 		return simplifyProd(items), nil
 	default:
 		// algebraic conversions (Matrix, Vector, polynom, ...) -> CAS

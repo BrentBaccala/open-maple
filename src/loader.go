@@ -37,6 +37,22 @@ func (it *Interp) LoadDifferentialThomas(srcDir string) error {
 			return fmt.Errorf("load %s: %w", f, err)
 		}
 	}
+
+	// Run the package init proc. In a real Maple .lib build, build.sh wraps every
+	// package function as
+	//   pkg[f] := proc() `DT/initialized` <> 'true' and `DT/init`() <> 0: `DT/f`(args): end
+	// so the first call to any package function lazily runs `DT/init`, which
+	// builds `DifferentialThomasGlobalOptions` (the default options table:
+	// CompareStrategy, Factor, ReduceQListInSystem="Inequations", ...). The
+	// Phase-2 loading model deliberately skips the .lib archiving, so those
+	// wrappers don't exist and init was never triggered — leaving the options
+	// unset. ComputeRanking/ProcInput then merge an empty options table into the
+	// ranking, so e.g. ReduceQListInSystem is missing and ReduceQListInSystem
+	// takes the wrong branch (re-inserting half of Q every DoNextStep, doubling
+	// Q without bound). Call init explicitly here to match Maple's lazy trigger.
+	if _, err := it.Exec("`DifferentialThomas/initialized` <> 'true' and `DifferentialThomas/init`():"); err != nil {
+		return fmt.Errorf("DifferentialThomas/init: %w", err)
+	}
 	return nil
 }
 

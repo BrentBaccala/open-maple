@@ -159,14 +159,47 @@ func (it *Interp) applyValue(head Value, args []Value, headNode *tree) (Value, e
 	return &Func{Head: head, Args: args}, nil
 }
 
+// listMappableCASOps are unary CAS operations that Maple maps element-wise over
+// a list or set argument (numer([a/b, 1]) -> [numer(a/b), numer(1)]). The
+// DifferentialThomas factorizer relies on this: `map(numer, fak)` where each
+// `fak` entry is a [factor, multiplicity] *list* reaches `numer(list)`, and
+// Maple's numer threads over the list. Without threading, the list hits the CAS
+// backend as a single opaque arg and errors ("cannot decode arg: exprlist").
+var listMappableCASOps = map[string]bool{
+	"numer": true, "denom": true, "normal": true, "simplify": true,
+	"expand": true, "factor": true, "radnormal": true, "evala": true,
+}
+
 // dispatchUnknownCall routes a call whose head is an unbound name: it is either
 // a CAS op, or an inert function application (jet variable / symbol).
 func (it *Interp) dispatchUnknownCall(name string, args []Value) (Value, error) {
 	if isCASOp(name) {
+		// Maple threads these unary ops over a list/set argument.
+		if listMappableCASOps[name] && len(args) == 1 {
+			switch c := args[0].(type) {
+			case List:
+				return it.mapCASOverItems(name, c.Items, func(v []Value) Value { return List{v} })
+			case Set:
+				return it.mapCASOverItems(name, c.Items, func(v []Value) Value { return makeSet(v) })
+			}
+		}
 		return it.cas.Call(name, args)
 	}
 	// inert function application (e.g. u(x,y), cos(phi[0]))
 	return &Func{Head: Name{name}, Args: args}, nil
+}
+
+// mapCASOverItems applies a unary CAS op to each item and rewraps with mk.
+func (it *Interp) mapCASOverItems(name string, items []Value, mk func([]Value) Value) (Value, error) {
+	out := make([]Value, len(items))
+	for i, e := range items {
+		v, err := it.dispatchUnknownCall(name, []Value{e})
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return mk(out), nil
 }
 
 // callProc binds args and runs a procedure body in a fresh scope.
@@ -438,11 +471,17 @@ func (it *Interp) tableIndex(t *Table, idxVals []Value, name string) (Value, err
 	if v, ok := t.get(idx); ok {
 		return v, nil
 	}
-	// unassigned table entry -> inert indexed name
-	if name != "" {
-		return &Indexed{Head: Name{name}, Idx: idxVals}, nil
-	}
-	return &Indexed{Head: t, Idx: idxVals}, nil
+	// Unassigned entry of an existing table reads as NULL. DifferentialThomas
+	// pervasively probes optional slots with `not assigned(p['K']) or p['K']=NULL`
+	// and, in ProlongationConsidered, with a bare `if p['ConsideredProlongations']
+	// =NULL then p['ConsideredProlongations']:=table([]) fi`. The latter has no
+	// `assigned` guard, so the unassigned read MUST compare equal to NULL for the
+	// auto-created sub-table to ever materialise; otherwise an inert indexed name
+	// is returned, the `=NULL` test is false, the sub-table is never built, and
+	// the subsequent `p['ConsideredProlongations'][x]` indexes an inert value.
+	// `assigned(p['K'])` stays correct because it is a special form that inspects
+	// the table directly (it does not go through this read path).
+	return NULL(), nil
 }
 
 // indexCollection handles list/set/string indexing and range slicing. Returns
