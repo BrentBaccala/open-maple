@@ -288,6 +288,28 @@ func isNULL(v Value) bool {
 	return ok && len(s.Items) == 0
 }
 
+// isInfinityVal reports whether v is Maple's infinity or -infinity. infinity is
+// the bare Name{"infinity"}; -infinity is the product (-1)*infinity.
+func isInfinityVal(v Value) bool {
+	if n, ok := v.(Name); ok {
+		return n.Val == "infinity"
+	}
+	if p, ok := v.(*Prod); ok {
+		for _, f := range p.Factors {
+			if n, ok := f.(Name); ok && n.Val == "infinity" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isUndefinedVal reports whether v is Maple's undefined.
+func isUndefinedVal(v Value) bool {
+	n, ok := v.(Name)
+	return ok && n.Val == "undefined"
+}
+
 func nameVal(v Value) (string, bool) {
 	if n, ok := v.(Name); ok {
 		return n.Val, true

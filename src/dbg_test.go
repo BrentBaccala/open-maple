@@ -1,14 +1,20 @@
 package main
 import ("os";"testing")
-func TestDbgQ(t *testing.T){
+func TestDbgType(t *testing.T){
  if os.Getenv("OPENMAPLE_CAS")!="sage"{t.Skip()}
  it:=NewInterp()
- if e:=it.LoadDifferentialThomas(dtSrcDir());e!=nil{t.Fatal(e)}
- it.Exec("`DifferentialThomas/ComputeRanking`([x,y],[u]);")
- // build the system and inspect Q
- it.Exec("sys := `DifferentialThomas/ProcInput`([u[1,0]-u[0,0], u[0,1]-u[0,0]^2], [])[1]:")
- v,e:=it.Exec("sys[1]['Q'];")
- t.Logf("Q = %s e=%v",printValue(v),e)
- v2,_:=it.Exec("nops(sys[1]['Q']);")
- t.Logf("nops(Q)=%s",printValue(v2))
+ chk := []string{
+  "type(1, extended_numeric);",        // true
+  "type(infinity, extended_numeric);", // true
+  "type(infinity, numeric);",          // false in Maple
+  "type([1,2], list(extended_numeric));", // true
+  "type([infinity,infinity], list(extended_numeric));", // true
+  "type([1,2], list(integer));",       // true
+  "type([1,x], list(extended_numeric));", // false
+  "type(-infinity, extended_numeric);", // true
+ }
+ for _,c:=range chk {
+  v,e:=it.Exec(c)
+  t.Logf("%-45s => %s   e=%v",c,printValue(v),e)
+ }
 }

@@ -96,6 +96,15 @@ func (it *Interp) checkNamedType(v Value, name string, params []*tree) (bool, er
 			return true, nil
 		}
 		return false, nil
+	case "extended_numeric":
+		// Maple: numeric plus infinity, -infinity, and undefined.
+		switch v.(type) {
+		case Integer, Rational, Float:
+			return true, nil
+		}
+		return isInfinityVal(v) || isUndefinedVal(v), nil
+	case "infinity":
+		return isInfinityVal(v), nil
 	case "float":
 		_, ok := v.(Float)
 		return ok, nil

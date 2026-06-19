@@ -109,6 +109,12 @@ func (it *Interp) neg(v Value) Value {
 		return normRat(new(big.Rat).Neg(n.Val))
 	case Float:
 		return Float{-n.Val}
+	case List:
+		out := make([]Value, len(n.Items))
+		for i := range n.Items {
+			out[i] = it.neg(n.Items[i])
+		}
+		return List{out}
 	}
 	// symbolic: -1 * v
 	return &Prod{Factors: []Value{newInt(-1), v}}
@@ -117,6 +123,23 @@ func (it *Interp) neg(v Value) Value {
 func (it *Interp) arithAdd(a, b Value) (Value, error) {
 	if r, ok := numAdd(a, b); ok {
 		return r, nil
+	}
+	// Maple does element-wise arithmetic on equal-length lists: [1,2]+[3,4]=[4,6].
+	if la, oka := a.(List); oka {
+		if lb, okb := b.(List); okb {
+			if len(la.Items) != len(lb.Items) {
+				return nil, newMapleError("numeric exception: list lengths differ")
+			}
+			out := make([]Value, len(la.Items))
+			for i := range la.Items {
+				v, err := it.arithAdd(la.Items[i], lb.Items[i])
+				if err != nil {
+					return nil, err
+				}
+				out[i] = v
+			}
+			return List{out}, nil
+		}
 	}
 	// symbolic sum (drop zeros)
 	terms := append(sumTerms(a), sumTerms(b)...)
@@ -127,8 +150,44 @@ func (it *Interp) arithMul(a, b Value) (Value, error) {
 	if r, ok := numMul(a, b); ok {
 		return r, nil
 	}
+	// Maple scales a list by a scalar element-wise: 2*[1,2]=[2,4].
+	// (list*list is element-wise too, e.g. for equal-length lists.)
+	if la, oka := a.(List); oka {
+		if lb, okb := b.(List); okb {
+			if len(la.Items) != len(lb.Items) {
+				return nil, newMapleError("numeric exception: list lengths differ")
+			}
+			out := make([]Value, len(la.Items))
+			for i := range la.Items {
+				v, err := it.arithMul(la.Items[i], lb.Items[i])
+				if err != nil {
+					return nil, err
+				}
+				out[i] = v
+			}
+			return List{out}, nil
+		}
+		return it.scaleList(la, b)
+	}
+	if lb, okb := b.(List); okb {
+		return it.scaleList(lb, a)
+	}
 	factors := append(prodFactors(a), prodFactors(b)...)
 	return simplifyProd(factors), nil
+}
+
+// scaleList multiplies every element of l by the scalar s (Maple element-wise
+// scalar*list semantics).
+func (it *Interp) scaleList(l List, s Value) (Value, error) {
+	out := make([]Value, len(l.Items))
+	for i := range l.Items {
+		v, err := it.arithMul(s, l.Items[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i] = v
+	}
+	return List{out}, nil
 }
 
 func (it *Interp) arithDiv(a, b Value) (Value, error) {

@@ -686,6 +686,11 @@ func biSubsop(it *Interp, args []Value) (Value, error) {
 	repls := args[:len(args)-1]
 	ops := operands(expr)
 	newOps := append([]Value{}, ops...)
+	// deleted tracks operand positions (0-based) that subsop(i=NULL) removes.
+	// In Maple, substituting an operand with NULL deletes it; all index
+	// arguments refer to positions in the *original* operand list, so we
+	// record substitutions/deletions first and apply the deletions after.
+	deleted := make([]bool, len(newOps))
 	var head Value
 	for _, r := range repls {
 		eq, ok := r.(*Equation)
@@ -705,9 +710,20 @@ func biSubsop(it *Interp, args []Value) (Value, error) {
 		if i < 1 || i > len(newOps) {
 			return nil, newMapleError("subsop index out of range")
 		}
-		newOps[i-1] = eq.Rhs
+		if isNULL(eq.Rhs) {
+			deleted[i-1] = true
+		} else {
+			newOps[i-1] = eq.Rhs
+			deleted[i-1] = false
+		}
 	}
-	return rebuild(expr, head, newOps), nil
+	filtered := newOps[:0:0]
+	for j, v := range newOps {
+		if !deleted[j] {
+			filtered = append(filtered, v)
+		}
+	}
+	return rebuild(expr, head, filtered), nil
 }
 
 // rebuild reconstructs a value of the same shape with new operands (and maybe a
