@@ -334,12 +334,35 @@ func (it *Interp) store(name string, val Value) {
 	if it.scope != nil {
 		if it.scope.isLocal[name] {
 			it.scope.locals[name] = val
+			// Maple reference-parameter write-through: if this parameter was bound
+			// to a caller's table/proc passed as a bare name, reassigning the
+			// parameter writes through to that caller name too. (See scope.paramWB.)
+			if wb := it.scope.paramWB[name]; wb != nil {
+				storeAt(it, wb, val)
+			}
 			return
 		}
 		it.globals[name] = val
 		return
 	}
 	it.globals[name] = val
+}
+
+// storeAt writes val to a write-through target's name in its caller scope,
+// chaining further write-throughs if that name is itself a forwarded parameter.
+func storeAt(it *Interp, wb *wbTarget, val Value) {
+	if wb.sc == nil {
+		it.globals[wb.name] = val
+		return
+	}
+	if wb.sc.isLocal[wb.name] {
+		wb.sc.locals[wb.name] = val
+		if next := wb.sc.paramWB[wb.name]; next != nil {
+			storeAt(it, next, val)
+		}
+		return
+	}
+	it.globals[wb.name] = val
 }
 
 // ---------------------------------------------------------------------------

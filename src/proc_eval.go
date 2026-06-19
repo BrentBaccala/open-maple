@@ -12,38 +12,7 @@ import (
 // for debugging the decomposition path.
 var traceProcs = os.Getenv("OPENMAPLE_TRACE_PROCS") != ""
 
-// probeDecomp, when set via OPENMAPLE_PROBE_DECOMP, prints DoNextStep system
-// state (Q / Finished / Inconsistent / Equations / Inequations) on entry/exit
-// — a Go-side probe for the dropped-component investigation (task 414).
-var probeDecomp = os.Getenv("OPENMAPLE_PROBE_DECOMP") != ""
-
 func stderrW() *os.File { return os.Stderr }
-
-// probeField reads a string-keyed field of a (possibly name-aliased) system
-// table for the decomposition probe, returning "<not-a-table>" / "<unset>" if
-// it cannot be read.
-func (it *Interp) probeField(sys Value, field string) string {
-	t, ok := it.resolveRefForStore(sys).(*Table)
-	if !ok {
-		return "<not-a-table:" + printValue(sys) + ">"
-	}
-	v, ok := t.get(Name{Val: field})
-	if !ok {
-		return "<unset>"
-	}
-	return printValue(it.resolveRefDeep(v))
-}
-
-func (it *Interp) probeSystem(tag string, sys Value) {
-	fmt.Fprintf(stderrW(), "[probe-decomp] %s Q=%s Fin=%s Inc=%s | Eq=%s Ineq=%s\n",
-		tag,
-		it.probeField(sys, "Q"),
-		it.probeField(sys, "Finished"),
-		it.probeField(sys, "Inconsistent"),
-		it.probeField(sys, "Equations"),
-		it.probeField(sys, "Inequations"),
-	)
-}
 
 // makeProc builds a Proc value from a procNode, capturing whether `option
 // remember` is set.
@@ -132,11 +101,12 @@ func (it *Interp) evalCall(n *tree) (Value, error) {
 		val, bound := it.lookup(name)
 		if bound {
 			if p, ok := val.(*Proc); ok {
+				wb := it.argWritebacks(n.nodes[1:])
 				args, err := it.evalArgs(n.nodes[1:])
 				if err != nil {
 					return nil, err
 				}
-				return it.callProc(p, args)
+				return it.callProcWB(p, args, wb)
 			}
 			if b, ok := val.(*Builtin); ok {
 				args, err := it.evalArgs(n.nodes[1:])
@@ -233,8 +203,60 @@ func (it *Interp) mapCASOverItems(name string, items []Value, mk func([]Value) V
 	return mk(out), nil
 }
 
+// argWritebacks computes, for each call-argument node, a write-through target
+// when the argument is a bare assignable name bound (in the current/caller
+// scope) to a reference-type value (*Table or *Proc). Maple's reference-
+// parameter semantics make reassigning such a parameter inside the callee write
+// through to the caller's name (this is what DifferentialThomas's side-effecting
+// reducers rely on). Returns a slice parallel to the *flattened* argument list;
+// non-name / non-reference / sequence arguments get a nil entry. Returns nil if
+// no argument qualifies (the common case), so callProc skips the bookkeeping.
+//
+// argNodes are the raw call-argument AST nodes (n.nodes[1:]); they are evaluated
+// here only to test value kind — evalArgs has already produced the bound values,
+// so this re-evaluation just inspects the caller binding (cheap; names).
+func (it *Interp) argWritebacks(argNodes []*tree) []*wbTarget {
+	var out []*wbTarget
+	any := false
+	for _, nd := range argNodes {
+		// Only a bare name argument can be a write-through target. A sequence-
+		// valued name would flatten; treat it as opaque (nil) to keep alignment
+		// simple — DT never passes an exprseq-valued name to a reducer.
+		if nd.group != variable {
+			out = append(out, nil)
+			continue
+		}
+		nm := stripBacktick(nd.value)
+		v, bound := it.lookup(nm)
+		if !bound {
+			out = append(out, nil)
+			continue
+		}
+		switch v.(type) {
+		case *Table, *Proc:
+			// Caller-scope target for this name. If the caller's name is itself a
+			// forwarded parameter, storeAt chains through scope.paramWB at write
+			// time, so the write propagates the whole way up.
+			out = append(out, &wbTarget{sc: it.scope, name: nm})
+			any = true
+		default:
+			out = append(out, nil)
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
+}
+
 // callProc binds args and runs a procedure body in a fresh scope.
 func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
+	return it.callProcWB(p, args, nil)
+}
+
+// callProcWB is callProc with per-argument write-through targets (see
+// argWritebacks). wbTargets, when non-nil, is parallel to the flattened args.
+func (it *Interp) callProcWB(p *Proc, args []Value, wbTargets []*wbTarget) (Value, error) {
 	// option remember cache
 	var cacheKey string
 	if p.hasRemember {
@@ -278,15 +300,31 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 		return nil, err
 	}
 
+	// Wire reference-parameter write-through targets (Maple semantics): a
+	// parameter bound to a caller's table/proc-by-name writes through to that
+	// caller name when reassigned inside this proc. Only the leading positional
+	// params (no exprseq flattening past nparams) are wired — DT's side-effecting
+	// reducers always take their poly object as a leading positional parameter.
+	if len(wbTargets) > 0 {
+		for i, par := range params.nodes {
+			if i >= len(wbTargets) {
+				break
+			}
+			if wbTargets[i] == nil {
+				continue
+			}
+			pname, _, _ := parseParam(par)
+			if sc.paramWB == nil {
+				sc.paramWB = map[string]*wbTarget{}
+			}
+			sc.paramWB[pname] = wbTargets[i]
+		}
+	}
+
 	// activate scope
 	prev := it.scope
 	it.scope = sc
 	defer func() { it.scope = prev }()
-
-	if probeDecomp && strings.HasSuffix(p.name, "/DoNextStep") && len(args) >= 1 {
-		fmt.Fprintf(stderrW(), "[probe-decomp] === DoNextStep ENTER ===\n")
-		it.probeSystem("  in ", args[0])
-	}
 
 	var result Value = NULL()
 	if body != nil {
@@ -316,23 +354,6 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 	// returned [sys1, sys2] of local-table systems resolves too. (Same
 	// reference-semantics rationale as resolveRefForStore / evalArgs.)
 	result = it.resolveRefDeep(result)
-
-	if probeDecomp && strings.HasSuffix(p.name, "/DoNextStep") {
-		switch r := result.(type) {
-		case Seq:
-			if len(r.Items) == 0 {
-				fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: 0 new systems (NULL)\n")
-			} else {
-				fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: %d new system(s)\n", len(r.Items))
-				for i, s := range r.Items {
-					it.probeSystem(fmt.Sprintf("  out[%d]", i), s)
-				}
-			}
-		default:
-			fmt.Fprintf(stderrW(), "[probe-decomp] DoNextStep RETURN: 1 new system\n")
-			it.probeSystem("  out[0]", result)
-		}
-	}
 
 	if p.hasRemember {
 		p.remember[cacheKey] = result

@@ -35,6 +35,28 @@ func TestDecompositionSmoke(t *testing.T) {
 	}
 	t.Logf("decomposition returned: %s", printValue(r))
 
+	// Structural milestone (task 414): the decomposition must return exactly ONE
+	// finished system whose single equation reduces to u[0,0] (i.e. u = 0) — the
+	// component forced by the integrability condition u_xy: u^2 = 2u^2 => u = 0.
+	// Verified structurally (the returned system table's tree equation), since
+	// the pretty-printed string still depends on the Phase-4 printer-fidelity gap.
+	sys, ok := r.(List)
+	if !ok || len(sys.Items) != 1 {
+		t.Fatalf("expected a 1-component decomposition (u=0), got: %s", printValue(r))
+	}
+	// The component's equation lives in the Janet tree under DVar `u`; its Polynom
+	// must be u[0,0]. Pull it via the package accessor for robustness against the
+	// internal table layout.
+	it.globals["__sys414"] = sys.Items[0]
+	pol, err := it.Exec("`DifferentialThomas/StandardForm`(`DifferentialThomas/DifferentialSystemJanetTrees`(__sys414)['u']);")
+	if err != nil {
+		t.Fatalf("could not read the component's equation: %v", err)
+	}
+	if got := printValue(pol); got != "u[0, 0]" {
+		t.Fatalf("component equation: got %q, want u[0, 0] (u=0)", got)
+	}
+	t.Logf("STRUCTURAL MATCH: single component, equation u[0, 0] = 0 (u=0)")
+
 	// Try PrettyPrint too (Phase-4 target output).
 	pp, err := it.Exec("`DifferentialThomas/PrettyPrintDifferentialSystem`(`DifferentialThomas/DifferentialThomasDecomposition`([u[1,0]-u[0,0], u[0,1]-u[0,0]^2], []));")
 	if err != nil {

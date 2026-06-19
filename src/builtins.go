@@ -59,6 +59,7 @@ func registerBuiltins(it *Interp) {
 	reg("piecewise", biPiecewise)
 	reg("ListTools:-Search", biListSearch)
 	reg("ListTools:-Reverse", biListReverse)
+	reg("ListTools:-FindMaximalElement", biFindMaximalElement)
 	reg("StringTools:-Trim", biStringTrim)
 	reg("add_function", biAddFunction)
 	reg("add_type", biAddType)
@@ -1395,6 +1396,25 @@ func biMin(it *Interp, args []Value) (Value, error) {
 }
 
 func reduceNum(args []Value, keep func(a, b *big.Rat) bool, name string) (Value, error) {
+	// Maple's max/min flatten list/set arguments: max([a,b],c) ranges over a,b,c.
+	// DT relies on this (e.g. `max(map(a->a[currentivar],leafs))` in
+	// FactorModuleBasisFromTreeRecursive, where the map yields a one-element list
+	// — without flattening, max returns the list itself and downstream
+	// `maxdeg+1` is an unsimplified list+int Sum). Flatten one level.
+	if len(args) > 0 {
+		flat := make([]Value, 0, len(args))
+		for _, a := range args {
+			switch c := a.(type) {
+			case List:
+				flat = append(flat, c.Items...)
+			case Set:
+				flat = append(flat, c.Items...)
+			default:
+				flat = append(flat, a)
+			}
+		}
+		args = flat
+	}
 	if len(args) == 0 {
 		// Maple: max() = -infinity, min() = infinity (the identity for the
 		// respective fold). DT relies on max() over an empty index list.
@@ -1541,6 +1561,40 @@ func biListSearch(it *Interp, args []Value) (Value, error) {
 		}
 	}
 	return newInt(0), nil
+}
+
+// biFindMaximalElement implements ListTools:-FindMaximalElement(L) and
+// FindMaximalElement(L, 'position'). Returns the maximal element; with the
+// `position` option it returns the sequence `maxElement, index` (1-based index
+// of the first maximal element). DT uses
+// `[ListTools[FindMaximalElement](subivar,position)][2]` to get the index of the
+// largest sub-independent-variable degree (tree:247).
+func biFindMaximalElement(it *Interp, args []Value) (Value, error) {
+	if err := need(args, 1, "ListTools:-FindMaximalElement"); err != nil {
+		return nil, err
+	}
+	items, ok := positional(args[0])
+	if !ok || len(items) == 0 {
+		// Maple errors on an empty list; mirror with a Maple-style error so the
+		// failure is legible rather than a Go panic.
+		return nil, newMapleError("ListTools:-FindMaximalElement: empty or non-list argument")
+	}
+	wantPos := false
+	for _, a := range args[1:] {
+		if nm, ok := a.(Name); ok && nm.Val == "position" {
+			wantPos = true
+		}
+	}
+	maxIdx := 0
+	for i := 1; i < len(items); i++ {
+		if compareValues(items[i], items[maxIdx]) > 0 {
+			maxIdx = i
+		}
+	}
+	if wantPos {
+		return Seq{Items: []Value{items[maxIdx], newInt(int64(maxIdx + 1))}}, nil
+	}
+	return items[maxIdx], nil
 }
 
 func biListReverse(it *Interp, args []Value) (Value, error) {

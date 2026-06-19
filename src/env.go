@@ -24,6 +24,26 @@ type scope struct {
 	nparams  int             // number of declared positional params
 	procName string
 	captured map[string]Value // lexical-closure env captured at proc construction
+
+	// paramWB records, per parameter name, a write-through target in the
+	// caller's scope. Maple binds a reference-type argument (a table/proc passed
+	// as a bare assignable name) such that reassigning the *parameter* inside the
+	// proc writes through to the caller's name — this is what makes DT's
+	// `ReduceWithSideEffects` (which does `q := PseudoRemainder(...)` on its
+	// parameter and is called for its side effect, the caller ignoring the return
+	// value) actually reduce the caller's polynomial object. Without this, the
+	// rebind only updates the callee's local and the reduction is lost (the poly
+	// then mis-reduces in the tail pass, the leader changes, and the system is
+	// falsely declared Inconsistent — dropping the surviving component). Only set
+	// for arguments that were bare names bound to a *Table/*Proc in the caller.
+	paramWB map[string]*wbTarget
+}
+
+// wbTarget is a write-through destination: a name in a caller scope (sc==nil
+// means the interpreter's global table).
+type wbTarget struct {
+	sc   *scope
+	name string
 }
 
 func newScope() *scope {
