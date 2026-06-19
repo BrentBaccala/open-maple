@@ -149,8 +149,18 @@ func (it *Interp) checkNamedType(v Value, name string, params []*tree) (bool, er
 		}
 		return it.checkElems(s.Items, params)
 	case "table":
-		_, ok := v.(*Table)
-		return ok, nil
+		if _, ok := v.(*Table); ok {
+			return true, nil
+		}
+		// a name holding a table satisfies type(.,table) in Maple (type
+		// evaluates the name). Resolve last-name-eval aliases.
+		if nm, ok := v.(Name); ok {
+			if rv, bound := it.lookup(nm.Val); bound {
+				_, isT := rv.(*Table)
+				return isT, nil
+			}
+		}
+		return false, nil
 	case "function", "procedure":
 		switch v.(type) {
 		case *Proc, *Builtin:

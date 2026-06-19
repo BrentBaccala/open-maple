@@ -62,6 +62,58 @@ func registerBuiltins(it *Interp) {
 	reg("StringTools:-Trim", biStringTrim)
 	reg("add_function", biAddFunction)
 	reg("add_type", biAddType)
+
+	// Operator-as-function forms: Maple lets `+`(a,b,...), `*`(...), `-`(...)
+	// be called like procedures (DT uses `+`(op(u)) to sum a jet-index list and
+	// similar). Wire them to the same arithmetic the infix operators use.
+	reg("+", biOpAdd)
+	reg("*", biOpMul)
+	reg("-", biOpSub)
+}
+
+// biOpAdd implements `+`(a,b,...) = a+b+...; `+`() = 0.
+func biOpAdd(it *Interp, args []Value) (Value, error) {
+	var acc Value = newInt(0)
+	for _, a := range args {
+		v, err := it.arithAdd(acc, a)
+		if err != nil {
+			return nil, err
+		}
+		acc = v
+	}
+	return acc, nil
+}
+
+// biOpMul implements `*`(a,b,...) = a*b*...; `*`() = 1.
+func biOpMul(it *Interp, args []Value) (Value, error) {
+	var acc Value = newInt(1)
+	for _, a := range args {
+		v, err := it.arithMul(acc, a)
+		if err != nil {
+			return nil, err
+		}
+		acc = v
+	}
+	return acc, nil
+}
+
+// biOpSub implements `-`(a) = -a and `-`(a,b) = a-b.
+func biOpSub(it *Interp, args []Value) (Value, error) {
+	if len(args) == 0 {
+		return newInt(0), nil
+	}
+	if len(args) == 1 {
+		return it.arithAdd(newInt(0), it.neg(args[0]))
+	}
+	acc := args[0]
+	for _, a := range args[1:] {
+		v, err := it.arithAdd(acc, it.neg(a))
+		if err != nil {
+			return nil, err
+		}
+		acc = v
+	}
+	return acc, nil
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -71,6 +123,20 @@ func need(args []Value, n int, name string) error {
 		return newMapleError(fmt.Sprintf("%s expects %d arguments, got %d", name, n, len(args)))
 	}
 	return nil
+}
+
+// derefTable resolves a Name bound to a table into the *Table (so op/indets/etc.
+// operate on the table contents, matching Maple where these functions evaluate
+// the name). Non-table names and other values pass through unchanged.
+func (it *Interp) derefTable(v Value) Value {
+	if nm, ok := v.(Name); ok {
+		if rv, bound := it.lookup(nm.Val); bound {
+			if t, ok := rv.(*Table); ok {
+				return t
+			}
+		}
+	}
+	return v
 }
 
 // operands returns the Maple op-list of a value (its top-level subparts).
@@ -100,6 +166,19 @@ func operands(v Value) []Value {
 		return []Value{x.Lhs, x.Rhs}
 	case Rational:
 		return []Value{Integer{new(big.Int).Set(x.Val.Num())}, Integer{new(big.Int).Set(x.Val.Denom())}}
+	case *Table:
+		// Maple: op(t) -> an inert `table([idx=val, ...])`. The DT idiom
+		// `table([op(op(op(t)))])` then peels three levels:
+		//   op(t)        = table([ [eq1, eq2, ...] ])   (a Func head=table)
+		//   op(op(t))    = [eq1, eq2, ...]              (the List operand)
+		//   op(op(op(t)))= eq1, eq2, ...                (the Equation sequence)
+		// and table([eq1, eq2, ...]) rebuilds the table.
+		ks := x.sortedKeys()
+		eqs := make([]Value, 0, len(ks))
+		for _, k := range ks {
+			eqs = append(eqs, &Equation{Lhs: x.Keys[k], Rhs: x.Vals[k]})
+		}
+		return []Value{&Func{Head: Name{"table"}, Args: []Value{List{eqs}}}}
 	default:
 		// atomic: op(x) == x
 		return []Value{v}
@@ -114,10 +193,10 @@ func biOp(it *Interp, args []Value) (Value, error) {
 	}
 	// op(expr): all operands; op(i,expr): i-th; op(i..j,expr): slice; op(0,expr): head
 	if len(args) == 1 {
-		return seqOrSingle(operands(args[0])), nil
+		return seqOrSingle(operands(it.derefTable(args[0]))), nil
 	}
 	sel := args[0]
-	expr := args[1]
+	expr := it.derefTable(args[1])
 	if i, ok := intVal(sel); ok {
 		if i.Sign() == 0 {
 			return op0(expr), nil
@@ -220,6 +299,13 @@ func biNops(it *Interp, args []Value) (Value, error) {
 // ---- type -------------------------------------------------------------------
 
 func biType(it *Interp, args []Value) (Value, error) {
+	// type(NULL, T): the NULL first operand is dropped by exprseq flattening, so
+	// the call arrives with one arg (the type). Maple's type(NULL, T) is false
+	// for every concrete type T (NULL is the empty sequence). DT relies on this
+	// via `type(node['Degree'], table)` where Degree is stored as NULL.
+	if len(args) == 1 {
+		return vFalse, nil
+	}
 	if err := need(args, 2, "type"); err != nil {
 		return nil, err
 	}
@@ -893,8 +979,11 @@ func deepCopy(it *Interp, v Value) Value {
 }
 
 func biEval(it *Interp, args []Value) (Value, error) {
-	if err := need(args, 1, "eval"); err != nil {
-		return nil, err
+	// eval() with no args: the operand evaluated to NULL and was dropped by
+	// exprseq flattening (e.g. eval(q) where q holds NULL). Maple: eval(NULL) =
+	// NULL.
+	if len(args) == 0 {
+		return NULL(), nil
 	}
 	// eval(name) -> full evaluation (dereference, including tables/procs)
 	if len(args) == 1 {
@@ -1282,7 +1371,12 @@ func biMin(it *Interp, args []Value) (Value, error) {
 
 func reduceNum(args []Value, keep func(a, b *big.Rat) bool, name string) (Value, error) {
 	if len(args) == 0 {
-		return nil, newMapleError(name + ": no arguments")
+		// Maple: max() = -infinity, min() = infinity (the identity for the
+		// respective fold). DT relies on max() over an empty index list.
+		if name == "max" {
+			return &Prod{[]Value{newInt(-1), Name{"infinity"}}}, nil
+		}
+		return Name{"infinity"}, nil
 	}
 	best := args[0]
 	br, ok := toNumRat(best)

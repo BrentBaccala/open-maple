@@ -276,9 +276,11 @@ func (p *parser_t) parseNud() (*tree, error) {
 			}
 			return &tree{group: unaryNode, value: "+", nodes: []*tree{operand}}, nil
 		case "$":
-			// prefix $ (seq with implicit start) — rare; treat as unary.
+			// prefix $ (seq operator): `$ a..b` -> a, a+1, ..., b. Parse the
+			// operand at the range binding power so the `..` is captured as the
+			// operand (otherwise `$1..n` would parse as `($1)..n`).
 			p.next()
-			operand, err := p.parseExpr(bpSeq)
+			operand, err := p.parseExpr(bpRange - 1)
 			if err != nil {
 				return nil, err
 			}

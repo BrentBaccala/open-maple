@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -16,6 +17,10 @@ type Interp struct {
 	out       *strings.Builder // captured printf/print output
 	assertLvl int
 	cas       CAS // computer-algebra backend (stub in Phase 2)
+	// history holds the last three computed results for the ditto operators
+	// %, %%, %%% (history[0]=%, [1]=%%, [2]=%%%). Updated after each statement
+	// in execBlock. DT uses `[op(%%),%]` in DiffVarToList.
+	history [3]Value
 }
 
 // NewInterp builds an interpreter with builtins registered.
@@ -25,10 +30,32 @@ func NewInterp() *Interp {
 		builtins:  map[string]*Builtin{},
 		typeProcs: map[string]Value{},
 		out:       &strings.Builder{},
-		cas:       &stubCAS{},
+		cas:       selectCAS(),
 	}
 	registerBuiltins(it)
 	return it
+}
+
+// selectCAS picks the computer-algebra backend per the OPENMAPLE_CAS env var:
+//
+//	OPENMAPLE_CAS=sage   -> Sage subprocess backend (Phase 3+)
+//	OPENMAPLE_CAS=stub   -> stub backend (errors on every op)
+//	(unset)              -> stub (so existing tests run without Sage)
+//
+// The Sage backend is lazily started on first CAS call, so selecting it costs
+// nothing until an op is actually delegated.
+func selectCAS() CAS {
+	switch os.Getenv("OPENMAPLE_CAS") {
+	case "sage":
+		sb, err := newSageBackend()
+		if err != nil {
+			// fall back to stub but record the reason on first call
+			return &errCASBackend{err: err}
+		}
+		return sb
+	default:
+		return &stubCAS{}
+	}
 }
 
 // control-flow signals carried via Go errors.
@@ -76,8 +103,30 @@ func (it *Interp) execBlock(stmts []*tree) (Value, error) {
 			return last, err
 		}
 		last = v
+		it.pushHistory(v)
 	}
 	return last, nil
+}
+
+// pushHistory records a computed statement result for the ditto operators
+// %, %%, %%%. Assignments and NULL don't update history in Maple, but DT's
+// reliance is on plain expression statements (e.g. DiffVarToList computes
+// DifferentialVariableDerivation(a) then FunctionToList(u) then reads %%/%),
+// so we update on every non-assignment, non-NULL result.
+func (it *Interp) histOrNull(i int) Value {
+	if it.history[i] == nil {
+		return NULL()
+	}
+	return it.history[i]
+}
+
+func (it *Interp) pushHistory(v Value) {
+	if isNULL(v) {
+		return
+	}
+	it.history[2] = it.history[1]
+	it.history[1] = it.history[0]
+	it.history[0] = v
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +260,12 @@ func (it *Interp) evalName(name string) (Value, error) {
 			return Seq{append([]Value{}, it.scope.args...)}, nil
 		}
 		return NULL(), nil
+	case "%":
+		return it.histOrNull(0), nil
+	case "%%":
+		return it.histOrNull(1), nil
+	case "%%%":
+		return it.histOrNull(2), nil
 	}
 	v, ok := it.lookup(name)
 	if !ok {
@@ -256,9 +311,19 @@ func (it *Interp) lookup(name string) (Value, bool) {
 			v, ok := it.scope.locals[name]
 			return v, ok
 		}
-		// not a declared local -> global (declared global, or fall-through)
-		v, ok := it.globals[name]
-		return v, ok
+		// a global package name always wins over a captured closure value (DT
+		// package procs like `DifferentialThomas/Foo` are globals).
+		if v, ok := it.globals[name]; ok {
+			return v, ok
+		}
+		// lexical-closure fallback: a free name bound in the enclosing proc at
+		// construction time (e.g. dvar/ivar inside IsDifferentialVariable2).
+		if it.scope.captured != nil {
+			if v, ok := it.scope.captured[name]; ok {
+				return v, ok
+			}
+		}
+		return nil, false
 	}
 	v, ok := it.globals[name]
 	return v, ok
@@ -301,6 +366,15 @@ func (it *Interp) evalArgs(nodes []*tree) ([]Value, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Resolve table/proc name-aliases to the underlying object *in the
+		// current (caller) scope* before they cross into a callee scope or a
+		// collection. Last-name-eval yields Name{x} for a table-valued x; a
+		// local such name (e.g. ProcInput's `rankingtable`) is unresolvable in
+		// the callee, so we pass the table reference instead. Tables/procs are
+		// reference types in Maple, so sharing the object is faithful and keeps
+		// mutation visible. (See also resolveRefForStore for the assignment
+		// side of the same issue.)
+		v = it.resolveRefForStore(v)
 		if s, ok := v.(Seq); ok {
 			out = append(out, s.Items...)
 		} else {
@@ -331,7 +405,13 @@ func (it *Interp) evalAssign(n *tree) (Value, error) {
 func (it *Interp) assignTo(lhs *tree, rhsVal Value) error {
 	switch lhs.group {
 	case variable:
-		it.store(stripBacktick(lhs.value), rhsVal)
+		nm := stripBacktick(lhs.value)
+		// name an anonymous proc after the variable it's assigned to (aids
+		// debugging and matches Maple's "the procedure is named X" convention).
+		if p, ok := rhsVal.(*Proc); ok && p.name == "" {
+			p.name = nm
+		}
+		it.store(nm, it.resolveRefForStore(rhsVal))
 		return nil
 	case typeNode:
 		// x::T := v  (typed local in proc body, rare at statement level) — assign x
@@ -358,6 +438,32 @@ func (it *Interp) assignTo(lhs *tree, rhsVal Value) error {
 	default:
 		return errUnimplemented("assignment target " + lhs.group.String())
 	}
+}
+
+// resolveRefForStore handles Maple's reference-assignment for tables/procs.
+// When the RHS is a Name that last-name-eval-resolves (in the current scope)
+// to a *Table or *Proc, we store the underlying object rather than the name.
+// This is required so that `GlobalRanking := rankingtable` (where rankingtable
+// is a proc-local table) makes GlobalRanking reference the *same table object*
+// — otherwise the alias would dangle once the proc's scope is gone (the local
+// name is unbound at the call site). Tables/procs are reference types in Maple,
+// so sharing the object is the faithful semantics; reading the global back
+// still applies last-name-eval (returns the global's own name) and indexing
+// resolves through the stored table.
+func (it *Interp) resolveRefForStore(v Value) Value {
+	nm, ok := v.(Name)
+	if !ok {
+		return v
+	}
+	bound, has := it.lookup(nm.Val)
+	if !has {
+		return v
+	}
+	switch bound.(type) {
+	case *Table, *Proc:
+		return bound
+	}
+	return v
 }
 
 // assignIndexed implements t[i] := v with auto-creation of the table.

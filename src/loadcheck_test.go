@@ -61,14 +61,14 @@ func TestLoadDifferentialThomas(t *testing.T) {
 	}
 
 	// Verify the ranking table was fully populated (the ranking/table setup
-	// executed end-to-end, no CAS stub on this path).
-	grName, ok := it.globals["DifferentialThomas/GlobalRanking"].(Name)
-	if !ok {
-		t.Fatalf("GlobalRanking not set to a table alias: %T", it.globals["DifferentialThomas/GlobalRanking"])
-	}
-	tbl, err := it.asTable(grName)
+	// executed end-to-end, no CAS stub on this path). GlobalRanking holds the
+	// shared table object (reference-assignment semantics; see
+	// resolveRefForStore) — resolve via asTable, which accepts a *Table or a
+	// resolvable Name.
+	tbl, err := it.asTable(it.globals["DifferentialThomas/GlobalRanking"])
 	if err != nil {
-		t.Fatalf("GlobalRanking does not resolve to a table: %v", err)
+		t.Fatalf("GlobalRanking does not resolve to a table (%T): %v",
+			it.globals["DifferentialThomas/GlobalRanking"], err)
 	}
 	for _, key := range []string{"Compare", "RankingString", "IVar", "DVar",
 		"IsDifferentialVariable", "FunctionToList", "RankingList", "NoDeepCopy"} {

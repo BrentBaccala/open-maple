@@ -600,8 +600,16 @@ func (it *Interp) evalUnary(n *tree) (Value, error) {
 			return vFAIL, nil
 		}
 	case "$":
-		// prefix $ — rare; treat operand evaluation as a single-element seq.
-		return it.eval(n.nodes[0])
+		// prefix $ — `$ a..b` produces the integer sequence a, a+1, ..., b
+		// (empty if a>b). `$ expr` on a non-range yields the single value.
+		v, err := it.eval(n.nodes[0])
+		if err != nil {
+			return nil, err
+		}
+		if rng, ok := v.(*Range); ok {
+			return expandIntRange(rng)
+		}
+		return v, nil
 	case "!post":
 		v, err := it.eval(n.nodes[0])
 		if err != nil {
@@ -633,6 +641,21 @@ func factorial(n *big.Int) *big.Int {
 //   expr $ i = lo..hi   (range form, handled in call/seq builtins normally)
 //   x $ n               (n copies of x)
 //   lo .. hi expressed via range
+// expandIntRange expands an integer Range a..b into the sequence a,a+1,...,b
+// (NULL if a>b). Used by the prefix `$ a..b` operator.
+func expandIntRange(rng *Range) (Value, error) {
+	lo, lok := intVal(rng.Lo)
+	hi, hok := intVal(rng.Hi)
+	if !lok || !hok {
+		return nil, fmt.Errorf("$ range bounds must be integers")
+	}
+	var items []Value
+	for i := lo.Int64(); i <= hi.Int64(); i++ {
+		items = append(items, newInt(i))
+	}
+	return Seq{items}, nil
+}
+
 func (it *Interp) evalSeqOp(n *tree) (Value, error) {
 	left := n.nodes[0]
 	right, err := it.eval(n.nodes[1])

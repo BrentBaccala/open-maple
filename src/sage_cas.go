@@ -241,6 +241,20 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 		op = op[:i]
 	}
 
+	// Maple-atomic short-circuits: denom/numer/normal of an expression that
+	// contains an inert non-arithmetic application (e.g. the DT-source quirk
+	// `Joseph/StandardForm(table)` at main:241, which stays unevaluated) follow
+	// Maple's "treat as having denominator 1" semantics rather than failing to
+	// parse in Sage. denom -> 1, numer -> self, normal -> self.
+	if len(args) >= 1 && containsOpaque(args[0]) {
+		switch op {
+		case "denom":
+			return newInt(1), nil
+		case "numer", "normal", "simplify", "expand", "collect":
+			return args[0], nil
+		}
+	}
+
 	// Build a name-sanitization context from all operands.
 	san := newSanitizer()
 	san.collect(args)
@@ -272,17 +286,89 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 	if !resp.OK {
 		return nil, fmt.Errorf("sage %s: %s", op, resp.Error)
 	}
-	return s.decodeResult(op, resp.Result, san)
+	v, err := s.decodeResult(op, resp.Result, san)
+	if err != nil {
+		return nil, err
+	}
+	// indets returns a *set* in Maple (DT does set ops on it: `indets(p) minus
+	// {...}`, `intersect`). The server returns a list; convert to a Set.
+	if op == "indets" {
+		if l, ok := v.(List); ok {
+			return makeSet(l.Items), nil
+		}
+	}
+	return v, nil
+}
+
+// mathFuncs are transcendental/elementary function heads Sage's symbolic ring
+// understands; an inert Func with one of these heads is NOT opaque.
+var mathFuncs = map[string]bool{
+	"cos": true, "sin": true, "tan": true, "exp": true, "log": true,
+	"ln": true, "sqrt": true, "cot": true, "sec": true, "csc": true,
+	"arctan": true, "arcsin": true, "arccos": true, "sinh": true,
+	"cosh": true, "tanh": true, "abs": true,
+}
+
+// containsOpaque reports whether v contains an inert function application whose
+// head is not a known math function (and is not a jet variable u(x,y), which is
+// handled as a symbol). Such expressions cannot be sent to Sage as polynomials.
+func containsOpaque(v Value) bool {
+	switch n := v.(type) {
+	case *Func:
+		head := ""
+		if hn, ok := n.Head.(Name); ok {
+			head = hn.Val
+		}
+		if !mathFuncs[head] {
+			return true
+		}
+		for _, a := range n.Args {
+			if containsOpaque(a) {
+				return true
+			}
+		}
+		return false
+	case *Sum:
+		for _, t := range n.Terms {
+			if containsOpaque(t) {
+				return true
+			}
+		}
+	case *Prod:
+		for _, f := range n.Factors {
+			if containsOpaque(f) {
+				return true
+			}
+		}
+	case *Power:
+		return containsOpaque(n.Base) || containsOpaque(n.Exp)
+	case List:
+		for _, it := range n.Items {
+			if containsOpaque(it) {
+				return true
+			}
+		}
+	case *Equation, *Relation, *Table:
+		return true
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
 // Argument encoding
 // ---------------------------------------------------------------------------
 
+// laOps are the ops where a List argument denotes a matrix/vector. For all
+// other ops a List is a Maple list of expressions (e.g. indets([p1,p2])).
+var laOps = map[string]bool{
+	"Matrix": true, "Vector": true, "array": true, "Array": true,
+	"LinearAlgebra": true,
+}
+
 func (s *SageBackend) encodeArgs(op, member string, args []Value, san *sanitizer) ([]json.RawMessage, error) {
 	out := make([]json.RawMessage, 0, len(args))
 	for _, a := range args {
-		enc, err := s.encodeArg(a, san)
+		enc, err := s.encodeArg(op, a, san)
 		if err != nil {
 			return nil, err
 		}
@@ -292,7 +378,7 @@ func (s *SageBackend) encodeArgs(op, member string, args []Value, san *sanitizer
 }
 
 // encodeArg serializes one Value operand to the wire arg form.
-func (s *SageBackend) encodeArg(v Value, san *sanitizer) (json.RawMessage, error) {
+func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMessage, error) {
 	switch n := v.(type) {
 	case Integer:
 		return json.Marshal(map[string]string{"int": n.Val.String()})
@@ -303,11 +389,26 @@ func (s *SageBackend) encodeArg(v Value, san *sanitizer) (json.RawMessage, error
 		// jet variable -> sanitized single name
 		return json.Marshal(map[string]string{"name": san.sanitizeIndexed(n)})
 	case List:
-		// a matrix (list of rows) or a vector — detect rows
-		if isMatrixList(n) {
-			return s.encodeMatrix(n, san)
+		if laOps[op] {
+			// a matrix (list of rows) or a vector
+			if isMatrixList(n) {
+				return s.encodeMatrix(n, san)
+			}
+			return s.encodeVector(n.Items, san)
 		}
-		return s.encodeVector(n.Items, san)
+		// a Maple list of expressions (e.g. indets([p1, p2]), coeffs over a
+		// list): send each element's string form.
+		strs := make([]string, len(n.Items))
+		for i, it := range n.Items {
+			strs[i] = san.sanitizeExpr(it)
+		}
+		return json.Marshal(map[string][]string{"exprlist": strs})
+	case Set:
+		strs := make([]string, len(n.Items))
+		for i, it := range n.Items {
+			strs[i] = san.sanitizeExpr(it)
+		}
+		return json.Marshal(map[string][]string{"exprlist": strs})
 	default:
 		// polynomial / rational / symbolic expression -> sanitized string
 		str := san.sanitizeExpr(v)
@@ -370,7 +471,7 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		if err := json.Unmarshal(r, &str); err != nil {
 			return nil, err
 		}
-		bi, ok := new(bigIntT).SetString(str, 10)
+		bi, ok := new(big.Int).SetString(str, 10)
 		if !ok {
 			return nil, fmt.Errorf("bad int result %q", str)
 		}
@@ -817,8 +918,9 @@ func printSanPrec(v Value, parent int, s *sanitizer) string {
 	case *Indexed:
 		return s.sanitizeIndexed(n)
 	case *Func:
-		// transcendental function: keep head name, recurse args
-		head := printSanPrec(n.Head, precAtom, s)
+		// transcendental function: keep head name (NOT registered as a ring
+		// variable — it is a function symbol), recurse args
+		head := funcHeadString(n.Head)
 		args := make([]string, len(n.Args))
 		for i, a := range n.Args {
 			args[i] = printSanPrec(a, precSeq, s)
@@ -862,6 +964,15 @@ func printSanSum(sm *Sum, s *sanitizer) string {
 		}
 	}
 	return b.String()
+}
+
+// funcHeadString renders a function head (e.g. cos) as a plain name without
+// registering it as a polynomial-ring variable.
+func funcHeadString(h Value) string {
+	if n, ok := h.(Name); ok {
+		return n.Val
+	}
+	return printValue(h)
 }
 
 func printSanProd(p *Prod, s *sanitizer) string {

@@ -28,6 +28,14 @@ func (*stubCAS) Call(op string, args []Value) (Value, error) {
 	return nil, &errCASUnimplemented{Op: fmt.Sprintf("%s/%d", op, len(args))}
 }
 
+// errCASBackend is returned when the requested backend (e.g. Sage) could not be
+// constructed; it reports the construction error on every call.
+type errCASBackend struct{ err error }
+
+func (e *errCASBackend) Call(op string, args []Value) (Value, error) {
+	return nil, fmt.Errorf("CAS backend unavailable: %v (op %s)", e.err, op)
+}
+
 // casOps is the exact set of computer-algebra operations that Phase 3 must
 // implement in the Sage bridge. Derived from the Phase-1 audit table. Anything
 // in this set, when called as an unbound name, is routed to CAS.Call rather

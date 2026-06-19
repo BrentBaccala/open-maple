@@ -196,7 +196,11 @@ func (p *parser_t) parseNameDecl(g nodeType) (*tree, error) {
 		if p.cur().group == statementDelim || isBlockTerminator(p.cur()) {
 			break
 		}
-		nameExpr, err := p.parseExpr(0)
+		// Parse each declared name above comma precedence so a comma separates
+		// declarations rather than building one comma-exprseq (which would let
+		// only the first name register as local — the cause of a scope leak in
+		// multi-name `local v,w,...` declarations).
+		nameExpr, err := p.parseExpr(bpComma)
 		if err != nil {
 			return nil, err
 		}

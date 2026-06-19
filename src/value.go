@@ -223,6 +223,12 @@ type Proc struct {
 	name        string
 	remember    map[string]Value // option remember cache (nil if not enabled)
 	hasRemember bool
+	// env captures the enclosing proc's local bindings when this proc is
+	// constructed inside another proc body (lexical closure). DifferentialThomas
+	// builds inner procs — e.g. IsDifferentialVariable2 inside ComputeRanking —
+	// that reference the outer proc's locals (dvar, ivar). nil for top-level
+	// procs (no enclosing scope). Read-only snapshot at construction time.
+	env map[string]Value
 }
 
 func (*Proc) isValue() {}

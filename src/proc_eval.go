@@ -3,13 +3,21 @@ package main
 import (
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
 )
+
+// traceProcs, when set via OPENMAPLE_TRACE_PROCS, prints the proc name on the
+// way out of a proc that propagates an error — a cheap call-stack reconstruction
+// for debugging the decomposition path.
+var traceProcs = os.Getenv("OPENMAPLE_TRACE_PROCS") != ""
+
+func stderrW() *os.File { return os.Stderr }
 
 // makeProc builds a Proc value from a procNode, capturing whether `option
 // remember` is set.
 func (it *Interp) makeProc(n *tree, name string) *Proc {
-	p := &Proc{def: n, name: name}
+	p := &Proc{def: n, name: name, env: it.captureEnv()}
 	for _, c := range n.nodes {
 		if c.group == optionNode {
 			for _, o := range c.nodes {
@@ -21,6 +29,29 @@ func (it *Interp) makeProc(n *tree, name string) *Proc {
 		}
 	}
 	return p
+}
+
+// captureEnv snapshots the current proc scope's local bindings for a lexical
+// closure. Returns nil at top level (no enclosing scope). The snapshot is a
+// shallow copy of the locals map (table/proc values are references, so shared
+// state still mutates through; scalar locals are captured by value as Maple's
+// closures do for the values they reference at construction time).
+func (it *Interp) captureEnv() map[string]Value {
+	if it.scope == nil {
+		return nil
+	}
+	env := make(map[string]Value, len(it.scope.locals))
+	// inherit the enclosing proc's own captured env first (so nested closures
+	// see grand-parent locals), then overlay this scope's locals.
+	if it.scope.captured != nil {
+		for k, v := range it.scope.captured {
+			env[k] = v
+		}
+	}
+	for k, v := range it.scope.locals {
+		env[k] = v
+	}
+	return env
 }
 
 // makeArrow builds a Proc from an arrow expression `params -> body`. We
@@ -43,7 +74,7 @@ func (it *Interp) makeArrow(n *tree) *Proc {
 	// body becomes a rootNode with a single return-less expression statement
 	bodyRoot := &tree{group: rootNode, value: "body", nodes: []*tree{body}}
 	proc := &tree{group: procNode, nodes: []*tree{params, bodyRoot}}
-	return &Proc{def: proc}
+	return &Proc{def: proc, env: it.captureEnv()}
 }
 
 // evalCall evaluates f(args...). The head may be a builtin, a user proc, an
@@ -54,16 +85,17 @@ func (it *Interp) evalCall(n *tree) (Value, error) {
 	// Builtins and special forms keyed by head name.
 	if headNode.group == variable {
 		name := stripBacktick(headNode.value)
+		// special-form builtins that need unevaluated args (checked before
+		// regular builtins so e.g. ASSERT/userinfo stay lazy).
+		if v, handled, err := it.evalSpecialForm(name, n.nodes[1:]); handled {
+			return v, err
+		}
 		if b, ok := it.builtins[name]; ok {
 			args, err := it.evalArgs(n.nodes[1:])
 			if err != nil {
 				return nil, err
 			}
 			return b.Fn(it, args)
-		}
-		// special-form builtins that need unevaluated args
-		if v, handled, err := it.evalSpecialForm(name, n.nodes[1:]); handled {
-			return v, err
 		}
 		// resolve the name to a proc/value
 		val, bound := it.lookup(name)
@@ -155,6 +187,7 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 	sc.args = args
 	sc.procName = p.name
 	sc.nparams = len(params.nodes)
+	sc.captured = p.env // lexical closure: free names fall back here
 
 	// gather declarations
 	var body *tree
@@ -193,6 +226,13 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 			if rs, ok := err.(returnSignal); ok {
 				result = rs.val
 			} else {
+				if traceProcs {
+					argStrs := make([]string, len(args))
+					for i, a := range args {
+						argStrs[i] = printValue(a)
+					}
+					fmt.Fprintf(stderrW(), "[proc-trace] error in %q(args=%v): %v\n", p.name, argStrs, err)
+				}
 				return nil, err
 			}
 		} else {
@@ -200,10 +240,48 @@ func (it *Interp) callProc(p *Proc, args []Value) (Value, error) {
 		}
 	}
 
+	// Resolve table/proc name-aliases in the return value to the underlying
+	// objects *while this scope is still active*. A proc that returns a local
+	// table (last-name-eval gives Name{localTable}) would otherwise hand back a
+	// name that is unbound at the call site. Recurse into lists/sets/seqs so a
+	// returned [sys1, sys2] of local-table systems resolves too. (Same
+	// reference-semantics rationale as resolveRefForStore / evalArgs.)
+	result = it.resolveRefDeep(result)
+
 	if p.hasRemember {
 		p.remember[cacheKey] = result
 	}
 	return result, nil
+}
+
+// resolveRefDeep resolves table/proc Name-aliases to their objects, recursing
+// through list/set/seq containers. Used on proc return values so local-table
+// references survive the scope teardown.
+func (it *Interp) resolveRefDeep(v Value) Value {
+	switch n := v.(type) {
+	case Name:
+		return it.resolveRefForStore(n)
+	case List:
+		items := make([]Value, len(n.Items))
+		for i, e := range n.Items {
+			items[i] = it.resolveRefDeep(e)
+		}
+		return List{items}
+	case Set:
+		items := make([]Value, len(n.Items))
+		for i, e := range n.Items {
+			items[i] = it.resolveRefDeep(e)
+		}
+		return makeSet(items)
+	case Seq:
+		items := make([]Value, len(n.Items))
+		for i, e := range n.Items {
+			items[i] = it.resolveRefDeep(e)
+		}
+		return Seq{items}
+	default:
+		return v
+	}
 }
 
 func nm(d *tree) string { return declName(d) }
@@ -345,6 +423,7 @@ func (it *Interp) evalIndex(n *tree) (Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	base = it.derefTable(base)
 	if t, ok := base.(*Table); ok {
 		return it.tableIndex(t, idxVals, "")
 	}
@@ -410,7 +489,7 @@ func indexCollection(base Value, idxVals []Value) (Value, bool, error) {
 		}
 		return rewrap(base, sub), true, nil
 	}
-	return nil, true, fmt.Errorf("unsupported index type")
+	return nil, true, fmt.Errorf("unsupported index type: base=%s idx=%s", printValue(base), printValue(idxVals[0]))
 }
 
 func positional(v Value) ([]Value, bool) {

@@ -69,7 +69,7 @@ def make_ring(varnames, frac=False):
     if not varnames:
         # A ring with no generators: use QQ directly for constants, but most
         # ops want a ring with .gens(); give a 1-var ring on a fresh name.
-        R = PolynomialRing(QQ, ['__dummy__'])
+        R = PolynomialRing(QQ, ['t_dummy'])
     else:
         R = PolynomialRing(QQ, list(varnames))
     if frac:
@@ -226,7 +226,7 @@ def op_denom(req):
 def op_degree(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
-    if len(req["args"]) >= 2:
+    if len(req["args"]) >= 2 and R.ngens() > 1:
         x = decode_arg(req["args"][1], R)
         return enc_int(p.degree(x))
     return enc_int(p.degree())
@@ -256,12 +256,14 @@ def op_coeff(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     x = decode_arg(req["args"][1], R)
-    n = int(req["args"][2]["int"]) if len(req["args"]) >= 3 else 1
-    # multivariate: coefficient of x^n
-    try:
+    a2 = req["args"][2] if len(req["args"]) >= 3 else {"int": "1"}
+    n = int(a2.get("int", a2.get("poly", "1")))
+    # univariate polys take an integer degree; multivariate take {var: deg}.
+    R = p.parent()
+    if R.ngens() <= 1:
+        c = p[n]  # univariate index by degree
+    else:
         c = p.coefficient({x: n})
-    except Exception:
-        c = p.coefficient(x**n)
     return enc_poly(c)
 
 
@@ -270,15 +272,13 @@ def op_lcoeff(req):
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    if len(req["args"]) >= 2:
+    if len(req["args"]) >= 2 and R.ngens() > 1:
         x = decode_arg(req["args"][1], R)
         d = p.degree(x)
-        try:
-            c = p.coefficient({x: d})
-        except Exception:
-            c = p.coefficient(x**d)
+        c = p.coefficient({x: d})
         return enc_poly(c)
-    return enc_poly(p.lc())
+    # univariate (or no var given): leading coefficient
+    return enc_poly(p.leading_coefficient())
 
 
 def op_tcoeff(req):
@@ -307,8 +307,22 @@ def op_collect(req):
 
 def op_indets(req):
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
-    return enc_list([{"name": str(v)} for v in sorted(p.variables(), key=str)])
+    a = req["args"][0]
+    vs = set()
+    def vars_of(s):
+        try:
+            return set(R(parse_in_ring(s, R)).variables())
+        except AttributeError:
+            return set()  # constant
+        except Exception:
+            return set()
+    if "exprlist" in a:
+        for s in a["exprlist"]:
+            vs |= vars_of(s)
+    else:
+        s = a.get("poly", a.get("name", a.get("int", "")))
+        vs = vars_of(str(s))
+    return enc_list([{"name": str(v)} for v in sorted(vs, key=str)])
 
 
 def op_divide(req):
@@ -374,12 +388,38 @@ def _coeff_ring_excluding(R, x):
     return PolynomialRing(QQ, [str(g) for g in others])
 
 
+def _content(p):
+    """Integer (rational) content of a polynomial over QQ, robust to the
+    univariate-over-QQ case where .content() returns an ideal / is absent."""
+    if p == 0:
+        return QQ(0)
+    try:
+        c = p.content()
+        # univariate QQ polys: .content() can be an ideal; coerce
+        c = QQ(c)
+        return c
+    except Exception:
+        pass
+    # gcd of numerators / lcm of denominators of the rational coefficients
+    coeffs = list(p.coefficients())
+    from sage.arith.functions import lcm as arith_lcm
+    nums = [QQ(c).numerator() for c in coeffs]
+    dens = [QQ(c).denominator() for c in coeffs]
+    g = ZZ(0)
+    for n in nums:
+        g = g.gcd(n)
+    d = ZZ(1)
+    for de in dens:
+        d = arith_lcm(d, de)
+    return QQ(g) / QQ(d)
+
+
 def op_primpart(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    return enc_poly(p / p.content())
+    return enc_poly(p / _content(p))
 
 
 def op_content(req):
@@ -387,7 +427,7 @@ def op_content(req):
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    return enc_poly(p.content())
+    return enc_poly(_content(p))
 
 
 def op_sqrfree(req):
@@ -408,21 +448,35 @@ def op_resultant(req):
     return enc_poly(a.resultant(b))
 
 
-def op_diff(req):
-    """diff(f, x) — polynomial AND symbolic (cos(phi[0]) etc.).
+def _looks_symbolic(s, varnames):
+    """Heuristic: does the expression contain a function call over a variable
+    (e.g. cos(phi)) that requires the symbolic ring rather than a polynomial
+    ring?  A bare variable followed by '(' is the signal."""
+    import re
+    # any alphabetic identifier immediately followed by '(' that is NOT one of
+    # the declared polynomial variables used as a multiplication is symbolic.
+    for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*\(', s):
+        name = m.group(1)
+        # a declared variable can't be a function head in poly form
+        return True
+    return False
 
-    Try the polynomial ring first; on failure parse symbolically in SR.
-    """
-    try:
-        R = make_ring(req["vars"])
-        f = decode_arg(req["args"][0], R)
-        x = decode_arg(req["args"][1], R)
-        return enc_poly(f.derivative(x))
-    except Exception:
-        f = parse_symbolic(req["args"][0]["poly"], req["vars"])
-        xs = parse_symbolic(req["args"][1].get("poly", req["args"][1].get("name")),
-                            req["vars"])
+
+def op_diff(req):
+    """diff(f, x) — polynomial AND symbolic (cos(phi[0]) etc.)."""
+    fstr = req["args"][0].get("poly", req["args"][0].get("name", ""))
+    xarg = req["args"][1]
+    xstr = xarg.get("poly", xarg.get("name", ""))
+
+    if _looks_symbolic(fstr, req["vars"]):
+        f = parse_symbolic(fstr, req["vars"])
+        xs = parse_symbolic(xstr, req["vars"])
         return enc_poly(f.derivative(xs))
+
+    R = make_ring(req["vars"])
+    f = decode_arg(req["args"][0], R)
+    x = decode_arg(xarg, R)
+    return enc_poly(f.derivative(x))
 
 
 def op_simplify(req):
@@ -436,9 +490,13 @@ def op_simplify(req):
 
 
 def op_binomial(req):
-    n = decode_arg(req["args"][0], make_ring(req["vars"]))
-    k = decode_arg(req["args"][1], make_ring(req["vars"]))
-    return enc_int(sage_binomial(ZZ(n), ZZ(k)))
+    def asint(a):
+        if "int" in a:
+            return ZZ(int(a["int"]))
+        return ZZ(int(a.get("poly", a.get("name"))))
+    n = asint(req["args"][0])
+    k = asint(req["args"][1])
+    return enc_int(sage_binomial(n, k))
 
 
 # --- linear algebra --------------------------------------------------------

@@ -23,6 +23,7 @@ type scope struct {
 	args     []Value         // actual call arguments (for args/nargs/_passed)
 	nparams  int             // number of declared positional params
 	procName string
+	captured map[string]Value // lexical-closure env captured at proc construction
 }
 
 func newScope() *scope {

@@ -25,6 +25,46 @@ func (it *Interp) evalSpecialForm(name string, argNodes []*tree) (Value, bool, e
 	case "parse":
 		v, err := it.sfParse(argNodes)
 		return v, true, err
+	case "ASSERT":
+		// ASSERT(cond, msg, ...) — Maple evaluates nothing unless assertions are
+		// enabled (kernelopts(assertlevel)). Crucially the message/diagnostic
+		// args (which DT fills with PrintDifferentialSystem(...) etc.) must NOT
+		// be evaluated at the default level, or eager evaluation hits code paths
+		// Maple skips. Lazy by design.
+		if it.assertLvl == 0 {
+			return NULL(), true, nil
+		}
+		cond, err := it.eval(argNodes[0])
+		if err != nil {
+			return nil, true, err
+		}
+		if truth(cond) != bTrue {
+			msg := "assertion failed"
+			if len(argNodes) >= 2 {
+				if mv, e := it.eval(argNodes[1]); e == nil {
+					if s, ok := strVal(mv); ok {
+						msg = s
+					}
+				}
+			}
+			return nil, true, newMapleError(msg)
+		}
+		return NULL(), true, nil
+	case "userinfo":
+		// userinfo(level, pkg, msg...) — diagnostic output only emitted when
+		// infolevel is high enough. Default: evaluate nothing (the msg args
+		// include expensive/fragile Print* calls). NOP.
+		return NULL(), true, nil
+	case "timelimit":
+		// timelimit(t, expr) — evaluate expr, returning its value. We do not
+		// enforce the wall limit (Maple raises "time expired" on timeout; DT
+		// passes -1 = no limit on the decomposition path). Special form so expr
+		// is evaluated lazily here, not as a pre-evaluated builtin arg.
+		if len(argNodes) < 2 {
+			return NULL(), true, nil
+		}
+		v, err := it.eval(argNodes[1])
+		return v, true, err
 	}
 	return nil, false, nil
 }
