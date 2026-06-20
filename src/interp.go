@@ -14,6 +14,12 @@ type Interp struct {
 	scope     *scope           // current proc activation (nil at top level)
 	builtins  map[string]*Builtin
 	typeProcs map[string]Value // user type/X procedures (from add_type / `type/X`)
+	// exports maps a package-exported short name (e.g. "JetList2Diff") to its
+	// qualified global name ("DifferentialThomas/JetList2Diff"). Populated by
+	// add_function. Maple lets a package proc call a sibling export by its short
+	// name; DT relies on this in PrettyPrintDifferentialSystem (calls bare
+	// JetList2Diff). evalCall consults this when a bare-name lookup fails.
+	exports   map[string]string
 	out       *strings.Builder // captured printf/print output
 	assertLvl int
 	cas       CAS // computer-algebra backend (stub in Phase 2)
@@ -29,6 +35,7 @@ func NewInterp() *Interp {
 		globals:   map[string]Value{},
 		builtins:  map[string]*Builtin{},
 		typeProcs: map[string]Value{},
+		exports:   map[string]string{},
 		out:       &strings.Builder{},
 		cas:       selectCAS(),
 	}

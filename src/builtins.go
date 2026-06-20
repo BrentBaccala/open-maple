@@ -451,13 +451,18 @@ func biMap2(it *Interp, args []Value) (Value, error) {
 func mapOver(coll Value, apply func(Value) (Value, error)) (Value, error) {
 	switch c := coll.(type) {
 	case List:
-		out := make([]Value, len(c.Items))
-		for i, e := range c.Items {
+		// Maple's map builds a container from f(item) results. A NULL result
+		// (empty sequence) collapses during list construction, and a Seq result
+		// flattens — so map(i->x$0,[1,2]) is [] (NOT [NULL,NULL]) and
+		// map(i->(a,b),[1]) is [a,b]. JetList2Diff_Var depends on this:
+		// map(i->IVar[i]$LD[i], ...) yields [] when all derivation orders are 0.
+		var out []Value
+		for _, e := range c.Items {
 			r, err := apply(e)
 			if err != nil {
 				return nil, err
 			}
-			out[i] = r
+			out = appendFlattenNonNull(out, r)
 		}
 		return List{out}, nil
 	case Set:
@@ -467,17 +472,17 @@ func mapOver(coll Value, apply func(Value) (Value, error)) (Value, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, r)
+			out = appendFlattenNonNull(out, r)
 		}
 		return makeSet(out), nil
 	case Seq:
-		out := make([]Value, len(c.Items))
-		for i, e := range c.Items {
+		var out []Value
+		for _, e := range c.Items {
 			r, err := apply(e)
 			if err != nil {
 				return nil, err
 			}
-			out[i] = r
+			out = appendFlattenNonNull(out, r)
 		}
 		return seqOrSingle(out), nil
 	case *Sum:
@@ -1110,7 +1115,9 @@ func biConvert(it *Interp, args []Value) (Value, error) {
 	target, _ := nameOrStr(args[1])
 	switch target {
 	case "string":
-		return MString{printValue(args[0])}, nil
+		// 1-D linear form (no operator spacing). This is what DT's FactorSorter
+		// byte-compares, so it must match Maple's lprint/convert-string surface.
+		return MString{lprint1D(args[0])}, nil
 	case "symbol":
 		return Name{plainText(args[0])}, nil
 	case "name":
@@ -1653,6 +1660,17 @@ func biAddFunction(it *Interp, args []Value) (Value, error) {
 			appendToTableList(fl, MString{pkg}, MString{f})
 			it.globals["packages_list"] = setUnionName(pl, MString{pkg})
 			pl = it.globals["packages_list"].(Set)
+			// Record the short-name → qualified-name export so a package proc can
+			// call a sibling by its bare name (Maple package-export semantics). The
+			// qualified global is `<pkg>/<f>` (e.g. DifferentialThomas/JetList2Diff).
+			// "all"/"<pkg>All" are bookkeeping pseudo-packages, not real prefixes —
+			// skip them; the real package binds the canonical target.
+			if it.exports != nil && pkg != "all" && !strings.HasSuffix(pkg, "All") {
+				qualified := pkg + "/" + f
+				if _, only := it.exports[f]; !only {
+					it.exports[f] = qualified
+				}
+			}
 		}
 	}
 	return NULL(), nil

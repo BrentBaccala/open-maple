@@ -116,6 +116,30 @@ func (it *Interp) evalCall(n *tree) (Value, error) {
 				return b.Fn(it, args)
 			}
 		}
+		// Package-export resolution: a bare name that is an exported short name of
+		// a loaded package (e.g. DT's PrettyPrintDifferentialSystem calls bare
+		// `JetList2Diff`) resolves to its qualified global `<pkg>/<name>`. Only
+		// consulted when the plain lookup above failed, so a local/global binding
+		// always wins over the package export (matching Maple scoping).
+		if qn, ok := it.exports[name]; ok && qn != name {
+			if val, bound := it.lookup(qn); bound {
+				if p, ok := val.(*Proc); ok {
+					wb := it.argWritebacks(n.nodes[1:])
+					args, err := it.evalArgs(n.nodes[1:])
+					if err != nil {
+						return nil, err
+					}
+					return it.callProcWB(p, args, wb)
+				}
+				if b, ok := val.(*Builtin); ok {
+					args, err := it.evalArgs(n.nodes[1:])
+					if err != nil {
+						return nil, err
+					}
+					return b.Fn(it, args)
+				}
+			}
+		}
 		// CAS package call dispatch (e.g. LinearAlgebra not via index) or unknown
 		args, err := it.evalArgs(n.nodes[1:])
 		if err != nil {
@@ -325,6 +349,18 @@ func (it *Interp) callProcWB(p *Proc, args []Value, wbTargets []*wbTarget) (Valu
 	prev := it.scope
 	it.scope = sc
 	defer func() { it.scope = prev }()
+
+	// Each procedure invocation gets its own ditto history (%, %%, %%%). Maple's
+	// %/%%/%%% refer to the results of completed *statements in the current proc
+	// body*, not to sub-expressions evaluated while running one statement. So a
+	// callee (e.g. a `map` lambda) must not clobber the caller's history.
+	// PrettyPrintDifferentialSystem relies on this: it runs two `map` statements
+	// then `return [op(%%), op(%)]`, where %% / % must be the two map *results*
+	// — not whatever the map lambdas last evaluated. Save and restore around the
+	// body so the caller's history survives this call.
+	prevHistory := it.history
+	it.history = [3]Value{}
+	defer func() { it.history = prevHistory }()
 
 	var result Value = NULL()
 	if body != nil {

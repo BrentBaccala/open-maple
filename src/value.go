@@ -133,6 +133,17 @@ func flattenSeq(vals []Value) []Value {
 	return out
 }
 
+// appendFlattenNonNull appends a value to a container-element slice using Maple
+// exprseq semantics: a NULL (empty Seq) contributes nothing, and a multi-element
+// Seq flattens in. This matches how Maple constructs lists/sets/sequences from
+// f(item) results in map — NULL elements vanish, sequences splice. See mapOver.
+func appendFlattenNonNull(out []Value, v Value) []Value {
+	if s, ok := v.(Seq); ok {
+		return append(out, s.Items...)
+	}
+	return append(out, v)
+}
+
 // seqOrSingle collapses a one-element sequence to the element (Maple: a 1-seq
 // is the value; a 0-seq is NULL).
 func seqOrSingle(vals []Value) Value {

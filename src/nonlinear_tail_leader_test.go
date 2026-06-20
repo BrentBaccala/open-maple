@@ -65,10 +65,10 @@ func TestNonlinearTailLeaderFixes(t *testing.T) {
 	// Fix 3: extended-real arithmetic on infinity.
 	eq("infinity - 1", "infinity")
 	eq("[infinity, infinity] - [0, 1]", "[infinity, infinity]")
-	// -infinity is represented as the product (-1)*infinity; the printer renders
-	// it "-1*infinity" (a known printer-fidelity gap, harmless to the algorithm —
-	// DT only type-checks these entries via {nonnegint, infinity}).
-	eq("-infinity + 5", "-1*infinity")
+	// -infinity is represented as the product (-1)*infinity but PRINTS as the
+	// atom "-infinity" (Phase-4 printer-fidelity fix, task 416 — previously the
+	// printer leaked "-1*infinity").
+	eq("-infinity + 5", "-infinity")
 
 	// Fix 4: structural operator type checks (backtick-stripped names).
 	eq("type(u[0,0]-u[1,0], `+`)", "true")

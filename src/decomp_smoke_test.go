@@ -57,14 +57,15 @@ func TestDecompositionSmoke(t *testing.T) {
 	}
 	t.Logf("STRUCTURAL MATCH: single component, equation u[0, 0] = 0 (u=0)")
 
-	// Try PrettyPrint too (Phase-4 target output).
+	// Phase-4 target (task 416): the full readme smoke test end to end. The
+	// pretty-printed decomposition must equal exactly the value readme.txt
+	// documents, [[u(x, y) = 0]].
 	pp, err := it.Exec("`DifferentialThomas/PrettyPrintDifferentialSystem`(`DifferentialThomas/DifferentialThomasDecomposition`([u[1,0]-u[0,0], u[0,1]-u[0,0]^2], []));")
 	if err != nil {
-		t.Logf("PrettyPrint errored (Phase-4 work): %v", err)
-	} else {
-		t.Logf("PrettyPrint returned: %s", printValue(pp))
-		if printValue(pp) == "[[u(x, y) = 0]]" {
-			t.Logf("EXACT TARGET MATCH: [[u(x, y) = 0]] (Phase 4 folded in)")
-		}
+		t.Fatalf("PrettyPrint errored: %v", err)
 	}
+	if got := printValue(pp); got != "[[u(x, y) = 0]]" {
+		t.Fatalf("PrettyPrint: got %q, want [[u(x, y) = 0]] (readme smoke target)", got)
+	}
+	t.Logf("EXACT TARGET MATCH: [[u(x, y) = 0]] (full readme smoke, Phase 4)")
 }

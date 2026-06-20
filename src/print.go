@@ -83,6 +83,12 @@ func printPrec(v Value, parent int) string {
 	case *Sum:
 		return wrap(printSum(n), precSum, parent)
 	case *Prod:
+		// Maple stores -infinity as the product (-1)*infinity but PRINTS it as the
+		// atom "-infinity" (not "-1*infinity"). Same for the literal -1*infinity
+		// the user never sees. Render the canonical surface form.
+		if isNegInfinityVal(n) {
+			return wrap("-infinity", precUnary, parent)
+		}
 		return wrap(printProd(n), precProd, parent)
 	case *Power:
 		return wrap(printPrec(n.Base, precPow)+"^"+printPrec(n.Exp, precUnary), precPow, parent)
