@@ -603,6 +603,17 @@ func (it *Interp) tryListElementAssign(base *tree, idx, rhsVal Value) (bool, err
 	return false, nil
 }
 
+// isSymbolicPlaceholder reports whether v is an unevaluated name or indexed
+// name — the value an unassigned (or self-name-cleared) slot holds. Maple
+// auto-vivifies a table when such a value is index-assigned into.
+func isSymbolicPlaceholder(v Value) bool {
+	switch v.(type) {
+	case Name, *Indexed:
+		return true
+	}
+	return false
+}
+
 // resolveAssignTable resolves the base of an indexed assignment to a *Table,
 // auto-creating tables as needed (Maple table auto-vivification). The base node
 // is either a plain name (t[i] := v) or a nested index (t[i][j] := v); for the
@@ -615,6 +626,13 @@ func (it *Interp) resolveAssignTable(base *tree) (*Table, error) {
 		if bound {
 			if t, isT := it.derefTable(cur).(*Table); isT {
 				return t, nil
+			}
+			// An unassigned/symbolic name auto-vivifies a table on index-assignment
+			// (Maple). See the indexNode case below for the DT idiom this serves.
+			if isSymbolicPlaceholder(cur) {
+				tbl := newTable()
+				it.store(name, tbl)
+				return tbl, nil
 			}
 			return nil, fmt.Errorf("cannot index-assign into non-table %s", name)
 		}
@@ -658,6 +676,16 @@ func (it *Interp) resolveAssignTable(base *tree) (*Table, error) {
 		if cur, ok := parent.get(idx); ok {
 			if t, isT := it.derefTable(cur).(*Table); isT {
 				return t, nil
+			}
+			// A slot holding an unevaluated name / indexed name auto-vivifies a
+			// table on index-assignment, matching Maple. DT's PartialDerivative
+			// clears a slot with the self-name idiom
+			// result['ConsideredProlongations'] := 'result['ConsideredProlongations']'
+			// then does result['ConsideredProlongations'][x] := false.
+			if isSymbolicPlaceholder(cur) {
+				tbl := newTable()
+				parent.set(idx, tbl)
+				return tbl, nil
 			}
 			return nil, fmt.Errorf("cannot index-assign into non-table slot")
 		}
