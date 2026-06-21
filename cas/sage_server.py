@@ -501,26 +501,34 @@ def _looks_symbolic(s, varnames):
 
 
 def op_diff(req):
-    """diff(f, x) — polynomial AND symbolic (cos(phi[0]) etc.)."""
+    """diff(f, x1, x2, ...) — differentiate by EACH variable in turn.
+
+    Maple's diff(f, x, x) is the second derivative, and DT's JetList2Diff emits
+    exactly this form for a higher-order jet: u[2,0] -> diff(u(x,t), x, x). Only
+    differentiating by the first variable (the original bug) silently dropped the
+    order, rendering u[2,0] as diff(u(x,t), x). Handles polynomial and symbolic
+    (cos(phi[0]), unknown function u(x,t), ...) operands.
+    """
     fstr = req["args"][0].get("poly", req["args"][0].get("name", ""))
-    xarg = req["args"][1]
-    xstr = xarg.get("poly", xarg.get("name", ""))
+    xargs = req["args"][1:]
 
     if _looks_symbolic(fstr, req["vars"]):
         f = parse_symbolic(fstr, req["vars"])
-        xs = parse_symbolic(xstr, req["vars"])
-        return enc_poly(f.derivative(xs))
+        for xarg in xargs:
+            xstr = xarg.get("poly", xarg.get("name", ""))
+            f = f.derivative(parse_symbolic(xstr, req["vars"]))
+        return enc_poly(f)
 
     R = make_ring(req["vars"])
-    f = decode_arg(req["args"][0], R)
-    x = decode_arg(xarg, R)
     # Coerce f into the ring so constants (Sage Integer/Rational, which lack a
     # `.derivative` method) differentiate correctly to 0. DT's
     # PartialDerivativeInternal calls diff on constant terms once the structural
     # type(p,`+`)/`*`/`^` checks branch correctly (e.g. diff(-1, y) for the unit
     # factor of a -u[1,0] term).
-    f = R(f)
-    return enc_poly(f.derivative(x))
+    f = R(decode_arg(req["args"][0], R))
+    for xarg in xargs:
+        f = f.derivative(decode_arg(xarg, R))
+    return enc_poly(f)
 
 
 def op_simplify(req):
