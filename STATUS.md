@@ -11,20 +11,26 @@ remaining frontiers are. Per-task detail lives in `~/project/reports/open-maple-
 
 ## Running the example programs
 
-`openmaple <file.mpl>` runs a Maple program directly. All four
-`~/thomas-experiments/ex[123]*` examples run end to end — using the **public**
-API (`with(DifferentialThomas)`, `Ranking`, `ThomasDecomposition`, `Equations`,
-`Inequations`) and **differential notation** input (`diff(u(x),x)`):
+`openmaple <file.mpl>` runs a Maple program directly. The `~/thomas-experiments/`
+examples run end to end — using the **public** API (`with(DifferentialThomas)`,
+`Ranking`, `ThomasDecomposition`, `Equations`, `Inequations`) and **differential
+notation** input (`diff(u(x),x)`):
 
 - `ex1_singular_ode` — `(u')^2 = 4u` → 2 simple systems
 - `ex1b_discover`    — accessor/typing probes (whattype, op, lastexception[2..])
 - `ex2_params`       — 3 parts incl. the parametric `a=0` vs `a<>0` split
 - `ex3_ode1d`        — 4 jets + 7 params 1D ODE ansatz → 13 simple systems
+- `ex4_hydrogen`     — the JOCA-paper hydrogen ansatz (3 ivar, 5 jets, 10 params,
+  39 eqs) → **29 simple systems**, ~18 min wall. The largest system run to date.
+  It `save`s its result to `hydrogen_thomas_result.m` (reloads via `read` in
+  ~0.4 s, vs the 18-min recompute).
 
-Reaching this surfaced a string of latent interpreter bugs (see the §"latent
-bugs" list below and the git log): indets dropping function/derivative terms,
-function-head and index-head name resolution, a leaking seq loop variable, and
-lexical-scope-vs-global resolution.
+Reaching the ex[123] set surfaced a string of latent interpreter bugs (see the
+§"latent bugs" list below and the git log): indets dropping function/derivative
+terms, function-head and index-head name resolution, a leaking seq loop
+variable, and lexical-scope-vs-global resolution. The hydrogen example surfaced
+the `evala`-on-a-huge-polynomial crash (see §"the hydrogen wall" below) rather
+than a correctness bug — the engine itself produced the right decomposition.
 
 ## What works (end-to-end, pinned by regression tests)
 
@@ -37,14 +43,16 @@ printed output (sage-gated):
 | readme smoke `[u[1,0]-u[0,0], u[0,1]-u[0,0]^2]` | DegRevLex | `[[u(x, y) = 0]]` |
 | single eq `u_x - u = 0` | DegRevLex | first-order leader (inert derivative) |
 | Cauchy–Riemann (2 dvar) | DegRevLex | sum-of-squares → 2-equation system |
-| 3-ivar / 3-dvar Overview | DegRevLex | 4 components; the largest, ~14 s |
+| 3-ivar / 3-dvar Overview | DegRevLex | 4 components; ~14 s |
 | Reduce worksheet | **EliminateFunction** | 1st case with **inequations** |
 | heat, Laplace, wave | DegRevLex | 2nd-order in x and/or t |
 | Burgers | DegRevLex | nonlinear |
 | factoring `u_x^2 - u` | DegRevLex | multi-component split + inequation |
 | overdetermined, two-eq split | DegRevLex | |
+| hydrogen ansatz (JOCA paper) | DegRevLex | 3 ivar, 5 jets, 10 params, 39 eqs → 29 components; the largest, ~18 min |
 
-Default suite (no Sage): 40 tests. Full Sage suite: green.
+Default suite (no Sage): ~50 tests pass (sage-gated tests skip). Full Sage suite:
+green, and clean under `OPENMAPLE_VERIFY_NATIVE=1`.
 
 ## How correctness is guaranteed: the verify harness
 
@@ -82,9 +90,13 @@ full JSON + parse + re-eval. `native_poly.go` computes the cheap ops directly on
 the Value AST (an expanded monomial→QQ-coeff normal form), reserving Sage for the
 hard ones:
 
-- **native**: degree, indets, expand, coeff, content, gcd (univariate +
+- **native**: degree, indets, expand, **evala**, coeff, content, gcd (univariate +
   integer-constant), numer/denom & normal/simplify (scalar); `toPolyNF` also
-  evaluates constant powers (`2^-1`) so division-form inputs stay native
+  evaluates constant powers (`2^-1`) so division-form inputs stay native.
+  `evala` is native because, with no algebraic numbers (`RootOf`) in play — the
+  only domain this port supports — `evala(p)` is just expand-to-standard-form;
+  DT calls it as `evala(expand(...))` and `evala(StandardForm(p)/c)`, both
+  polynomial. (A genuine rational function / `RootOf` input still falls to Sage.)
 - **order-independent polynomial equality** (`compareValues` via normal form) — the
   key enabler that made native expand/coeff safe regardless of term order
 - This took the 3-ivar/3-dvar system from a 240 s timeout to ~14 s, and cut its
@@ -94,15 +106,52 @@ Native results carry NO term-ordering risk for equality (order-independent) and
 reconstruct expand output in descending total degree to match Sage's printed
 surface (which feeds DT's FactorSorter).
 
+## The hydrogen wall: a Sage-parser crash, fixed
+
+The hydrogen ansatz crashed after ~7 min with `sage evala: maximum recursion
+depth exceeded during compilation`. Root cause: DT calls `evala(expand(...))` on
+a **fully expanded** polynomial; before native `evala`, that huge flat
+term-string (thousands of `+`-joined terms) round-tripped to Sage, where the
+string was parsed via `sage_eval` → CPython `compile()`, whose bytecode compiler
+recurses once per AST node and overflowed its default 1000-deep limit just
+*parsing* the sum (reproduced synthetically at ~3000 terms). Two fixes:
+
+1. **Native `evala`** removes the round-trip entirely (see the native layer
+   above) — the giant string never reaches Sage. This is the real fix.
+2. **Backstop in `cas/sage_server.py`**: `sys.setrecursionlimit(100000)` on the
+   main thread, so the ops that *genuinely* need Sage on a big expression
+   (`normal`/`numer`/`denom` of a large rational function) don't hit the same
+   wall. It must stay on the main thread — running the server loop off-thread
+   (the textbook deep-stack workaround) **segfaults Sage's cysignals SIGSEGV
+   handling**. Probed safe to 30000-term sums on the default stack.
+
+## Worksheet result persistence: save / read
+
+The hydrogen worksheet `save`s its 18-min result so it never recomputes. `save`,
+`read`, `currentdir`, and `time` were stubs/no-ops; they now work:
+
+- `save NAME, ..., "file"` writes each name as a re-readable `NAME := value:`
+  assignment (text form, same surface as `%a`/`print`). The `.m` extension is
+  Maple's *internal* binary format; we use the text form unconditionally since
+  this port both writes and reads the file. Reloads via `read` in ~0.4 s.
+- `read "file"` executes the file's statements in the current scope.
+- `currentdir([dir])` returns the cwd (was an inert symbol); optional chdir.
+- `time()` returns real CPU seconds via `getrusage` (was a `0.0` stub), so the
+  worksheets' `time() - st` elapsed prints are meaningful.
+
+Pinned by `save_read_test.go`.
+
 ## Remaining frontiers (characterized, none a clear quick win)
 
-1. **High-order systems are interpreter-CPU-bound, not CAS-bound.** The Juri–
-   Vladimir example (`u[1,1,3]-u[4,0,0], u[5,1,0]-u[0,4,0], u[0,6,0], u[4,2,0]`,
-   3 ivar) times out, but makes only ~92 Sage calls in 65 s — the cost is the Go
-   interpreter executing DT's prolongation logic. A CPU profile of the 3-var shows
-   allocation/GC (`mallocgc`, `scanobject`) and the Sage-Call encode/decode path as
-   the top consumers. Speeding this up means **reducing interpreter allocations**
-   (open-ended Go perf work), not faster CAS.
+1. **High-order / large systems are interpreter-CPU-bound, not CAS-bound.** Now
+   that native `evala` removed the last big Sage round-trip, the **hydrogen**
+   case (18 min, ~2040 s CPU) is the canonical example: its time is the Go
+   interpreter executing DT's prolongation logic, not the CAS. Same story for the
+   Juri–Vladimir example (`u[1,1,3]-u[4,0,0], u[5,1,0]-u[0,4,0], u[0,6,0],
+   u[4,2,0]`, 3 ivar), which makes only ~92 Sage calls in 65 s. A CPU profile of
+   the 3-var shows allocation/GC (`mallocgc`, `scanobject`) and the Sage-Call
+   encode/decode path as the top consumers. Speeding this up means **reducing
+   interpreter allocations** (open-ended Go perf work), not faster CAS.
 
 2. **Composite `numer`/`denom`/`normal`, `factors`, and multivariate `gcd` still
    round-trip to Sage.** `content` and the univariate / integer-constant slice of
@@ -110,8 +159,9 @@ surface (which feeds DT's FactorSorter).
    function* (fraction of polynomials) — would need rational-function support
    (polynomial division + gcd of numerator/denominator, building on the native
    univariate gcd); (b) genuinely **multivariate** gcd — needs a recursive
-   content/primitive-part algorithm; (c) `factors`/`evala` — factoring and
-   algebraic numbers, effectively Sage-bound. The 3-var's top remaining ops are
+   content/primitive-part algorithm; (c) `factors` — factoring, effectively
+   Sage-bound (`evala` is now native for the no-`RootOf` case). The 3-var's top
+   remaining ops are
    denom/factors/normal/indets/numer (~50–80 each). All verify-checkable but each
    is its own chunk; none would unlock the interpreter-bound high-order case.
 
@@ -126,7 +176,7 @@ surface (which feeds DT's FactorSorter).
 ```bash
 export PATH=~/.local/go-toolchain/go/bin:$PATH GOPATH=~/.local/gopath GOFLAGS=-mod=mod
 cd ~/open-maple/src
-go test ./...                                 # default suite (no Sage), 40 tests
+go test ./...                                 # default suite (no Sage), ~50 tests
 OPENMAPLE_CAS=sage go test ./...              # full suite through the Sage backend
 OPENMAPLE_CAS=sage OPENMAPLE_VERIFY_NATIVE=1 go test ./...   # native ≡ Sage check
 ```
