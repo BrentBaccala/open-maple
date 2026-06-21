@@ -45,6 +45,10 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		}
 	case "coeff":
 		v, ok = nativeCoeff(args)
+	case "numer":
+		v, ok = nativeNumerDenom(args, true)
+	case "denom":
+		v, ok = nativeNumerDenom(args, false)
 	}
 	if !ok {
 		return nil, false
@@ -452,6 +456,33 @@ func nativeCoeff(args []Value) (Value, bool) {
 		res.add(nm, c)
 	}
 	return fromPolyNF(res), true
+}
+
+// nativeNumerDenom implements numer(v)/denom(v) for a scalar argument — an
+// integer, rational, or a single name/indexed (jet) variable. DT calls
+// numer/denom pervasively on constant coefficients (the trace shows them as the
+// most frequent vars=[] Sage ops); handling the scalar case natively skips a
+// subprocess round-trip.
+//
+// The convention matches the Sage backend, which computes over Frac(QQ[vars]):
+// numer/denom there are POLYNOMIAL-fraction numer/denom, so a constant (even a
+// rational like -1/2) is its own numerator with denominator 1 — NOT the rational
+// numerator -1 / denominator 2. (This is what DT wants: numer/denom is used to
+// clear polynomial denominators of rational functions in the jet variables; a
+// scalar has none.) A composite polynomial / rational expression returns
+// ok=false → Sage. isNumer selects numer vs denom.
+func nativeNumerDenom(args []Value, isNumer bool) (Value, bool) {
+	if len(args) != 1 {
+		return nil, false
+	}
+	switch args[0].(type) {
+	case Integer, Rational, Name, *Indexed:
+		if isNumer {
+			return args[0], true
+		}
+		return newInt(1), true
+	}
+	return nil, false
 }
 
 // fromPolyNF reconstructs a Value AST (Sum/Prod/Power/atoms/number) from a
