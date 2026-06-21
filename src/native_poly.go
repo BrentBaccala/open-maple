@@ -72,6 +72,13 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		return nil, false
 	}
 	if it.verifyNative {
+		// indets on a Func-containing expression: native is the authority (Sage's
+		// indets drops applied-function terms and returns {}), so don't compare.
+		if name == "indets" {
+			if _, isPoly := toPolyNF(args[0]); !isPoly {
+				return v, true
+			}
+		}
 		// Compare against Sage only when Sage itself produces a value: the Sage
 		// path errors on inputs native handles correctly (e.g. degree(3, x) — the
 		// degree of a constant — makes op_degree raise), and there native is the
@@ -261,22 +268,75 @@ func (p *polyNF) mul(q *polyNF) *polyNF {
 // indexed/jet variables) that actually appear (nonzero exponent in some
 // surviving monomial). ok=false to fall back to Sage.
 func nativeIndets(v Value) (Value, bool) {
-	p, ok := toPolyNF(v)
-	if !ok {
-		return nil, false
-	}
-	seen := map[string]bool{}
-	var atoms []Value
-	for key, m := range p.mono {
-		_ = key
-		for a, e := range m {
-			if e > 0 && !seen[a] {
-				seen[a] = true
-				atoms = append(atoms, p.atoms[a])
+	if p, ok := toPolyNF(v); ok {
+		// Pure polynomial: read indeterminates off the normal form, so cancelled
+		// variables are dropped (matches Sage; verifiable).
+		seen := map[string]bool{}
+		var atoms []Value
+		for key, m := range p.mono {
+			_ = key
+			for a, e := range m {
+				if e > 0 && !seen[a] {
+					seen[a] = true
+					atoms = append(atoms, p.atoms[a])
+				}
 			}
 		}
+		return makeSet(atoms), true
 	}
-	return makeSet(atoms), true
+	// Func/transcendental-containing: collect every name / indexed / function
+	// subterm. Maple's indets includes applied functions (u(x), diff(u(x),x));
+	// the Sage path drops them (its sanitizer keeps only function ARGUMENTS and
+	// returns {}), so native is the authority here — DT's Diff2JetList relies on
+	// indets surfacing the diff and applied-function terms to convert diff-
+	// notation input (diff(u(x),x)) to jet form (u[1]).
+	atoms := map[string]Value{}
+	if !collectFuncIndets(v, atoms) {
+		return nil, false
+	}
+	items := make([]Value, 0, len(atoms))
+	for _, a := range atoms {
+		items = append(items, a)
+	}
+	return makeSet(items), true
+}
+
+// collectFuncIndets gathers every name / indexed / function subterm of v into
+// out (keyed canonically). Numbers/strings/booleans contribute nothing; an
+// unsupported node makes it return false.
+func collectFuncIndets(v Value, out map[string]Value) bool {
+	switch n := v.(type) {
+	case Integer, Rational, Float, MString, Boolean:
+		return true
+	case Name, *Indexed:
+		out[canonicalKey(v)] = v
+		return true
+	case *Func:
+		out[canonicalKey(v)] = v
+		for _, a := range n.Args {
+			if !collectFuncIndets(a, out) {
+				return false
+			}
+		}
+		return true
+	case *Sum:
+		for _, t := range n.Terms {
+			if !collectFuncIndets(t, out) {
+				return false
+			}
+		}
+		return true
+	case *Prod:
+		for _, f := range n.Factors {
+			if !collectFuncIndets(f, out) {
+				return false
+			}
+		}
+		return true
+	case *Power:
+		return collectFuncIndets(n.Base, out) && collectFuncIndets(n.Exp, out)
+	}
+	return false
 }
 
 // nativeDegree implements degree(p), degree(p, x) and degree(p, [x,...]) /
