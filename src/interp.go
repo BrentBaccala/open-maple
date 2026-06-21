@@ -195,9 +195,14 @@ func (it *Interp) eval(n *tree) (Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		hi, err := it.eval(n.nodes[1])
-		if err != nil {
-			return nil, err
+		// Open-ended upper bound (a.. — one child): a non-integer sentinel so
+		// indexCollection slices "to the end" (matches Maple's a..-1 for indexing).
+		hi := Value(Name{"_openrange_"})
+		if len(n.nodes) >= 2 {
+			hi, err = it.eval(n.nodes[1])
+			if err != nil {
+				return nil, err
+			}
 		}
 		return &Range{lo, hi}, nil
 	case callNode:

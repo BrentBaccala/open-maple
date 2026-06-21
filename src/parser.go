@@ -109,6 +109,16 @@ func (p *parser_t) atEnd() bool {
 	return p.cur().group == eofTok || p.pos >= len(p.tokens)
 }
 
+// atRangeEnd reports whether the current token closes an expression, so an
+// open-ended range (a..) can omit its upper bound. Closers: ] ) } , ; :  EOF.
+func (p *parser_t) atRangeEnd() bool {
+	switch p.cur().group {
+	case rbracket, rparen, rbrace, comma, statementDelim, eofTok:
+		return true
+	}
+	return false
+}
+
 func (p *parser_t) errf(format string, a ...interface{}) error {
 	return fmt.Errorf("parse error at token %d (%q): %s",
 		p.pos, p.cur().value, fmt.Sprintf(format, a...))

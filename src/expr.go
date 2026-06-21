@@ -404,9 +404,13 @@ func (p *parser_t) parseLed(left *tree, bp int) (*tree, error) {
 		return &tree{group: memberNode, value: ":-", nodes: []*tree{left, right}}, nil
 	}
 
-	// Range a..b
+	// Range a..b, or open-ended a.. (Maple's a..-1 when indexing — "to the end")
 	if t.group == operator && t.value == ".." {
 		p.next()
+		if p.atRangeEnd() {
+			// upper bound omitted: a one-child rangeNode (see rangeNode eval).
+			return &tree{group: rangeNode, value: "..", nodes: []*tree{left}}, nil
+		}
 		right, err := p.parseExpr(bpRange)
 		if err != nil {
 			return nil, err
