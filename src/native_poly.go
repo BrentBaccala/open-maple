@@ -49,6 +49,16 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		v, ok = nativeNumerDenom(args, true)
 	case "denom":
 		v, ok = nativeNumerDenom(args, false)
+	case "normal", "simplify":
+		// On a scalar/atom (constant or a single name/jet variable) normal and
+		// simplify are the identity — there is nothing to combine or reduce. A
+		// composite polynomial/rational expression returns ok=false → Sage, which
+		// owns the canonical form (and its term order, which feeds FactorSorter).
+		if len(args) == 1 {
+			if _, isAtom := atomOrConst(args[0]); isAtom {
+				v, ok = args[0], true
+			}
+		}
 	}
 	if !ok {
 		return nil, false
@@ -554,6 +564,17 @@ func monoTerm(c *big.Rat, m nfMono, atoms map[string]Value) Value {
 		return &Prod{Factors: factors}
 	}
 	return &Prod{Factors: append([]Value{coeffVal}, factors...)}
+}
+
+// atomOrConst reports whether v is a scalar constant (integer/rational) or a
+// single indeterminate atom (name/jet variable) — values that normal/simplify
+// leave unchanged.
+func atomOrConst(v Value) (Value, bool) {
+	switch v.(type) {
+	case Integer, Rational, Name, *Indexed:
+		return v, true
+	}
+	return nil, false
 }
 
 // polyAtom reports whether v is an indeterminate atom (a name or a jet/indexed
