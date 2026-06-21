@@ -65,13 +65,13 @@ full JSON + parse + re-eval. `native_poly.go` computes the cheap ops directly on
 the Value AST (an expanded monomial→QQ-coeff normal form), reserving Sage for the
 hard ones:
 
-- **native**: degree, indets, expand, coeff, content, numer/denom & normal/simplify
-  (scalar); `toPolyNF` also evaluates constant powers (`2^-1`) so division-form
-  inputs stay native
+- **native**: degree, indets, expand, coeff, content, gcd (univariate +
+  integer-constant), numer/denom & normal/simplify (scalar); `toPolyNF` also
+  evaluates constant powers (`2^-1`) so division-form inputs stay native
 - **order-independent polynomial equality** (`compareValues` via normal form) — the
   key enabler that made native expand/coeff safe regardless of term order
 - This took the 3-ivar/3-dvar system from a 240 s timeout to ~14 s, and cut its
-  Sage round-trips from ~592 to ~394 (content alone was ~198).
+  Sage round-trips from ~592 to ~363 (content ~198, gcd ~31 univariate).
 
 Native results carry NO term-ordering risk for equality (order-independent) and
 reconstruct expand output in descending total degree to match Sage's printed
@@ -87,16 +87,16 @@ surface (which feeds DT's FactorSorter).
    the top consumers. Speeding this up means **reducing interpreter allocations**
    (open-ended Go perf work), not faster CAS.
 
-2. **`gcd` (and composite `numer`/`denom`/`normal`) still round-trip to Sage.**
-   `content` is now native (it's just the coefficient gcd — no polynomial GCD).
-   The rest all reduce to a real **multivariate polynomial GCD** over Q: `gcd`
-   directly, and `numer`/`denom`/`normal` of a *rational function* (fraction of
-   polynomials) via gcd of numerator/denominator. `factors` needs factoring
-   (Sage-bound). After native content the 3-var's top remaining ops are denom/
-   factors/normal/indets/numer/gcd (~40–80 each). A native multivariate GCD is
-   the one substantial remaining polynomial-layer piece — high effort, verify-
-   checkable; it would speed up systems that already complete but would NOT unlock
-   the interpreter-bound high-order case.
+2. **Composite `numer`/`denom`/`normal`, `factors`, and multivariate `gcd` still
+   round-trip to Sage.** `content` and the univariate / integer-constant slice of
+   `gcd` are now native. What remains: (a) `numer`/`denom`/`normal` of a *rational
+   function* (fraction of polynomials) — would need rational-function support
+   (polynomial division + gcd of numerator/denominator, building on the native
+   univariate gcd); (b) genuinely **multivariate** gcd — needs a recursive
+   content/primitive-part algorithm; (c) `factors`/`evala` — factoring and
+   algebraic numbers, effectively Sage-bound. The 3-var's top remaining ops are
+   denom/factors/normal/indets/numer (~50–80 each). All verify-checkable but each
+   is its own chunk; none would unlock the interpreter-bound high-order case.
 
 3. **Matrix / LinearAlgebra rankings are unimplemented** — block dvar lists
    (`[[u,v],[w]]`) and custom `"Matrix"=A` rankings need the full Maple linear-
