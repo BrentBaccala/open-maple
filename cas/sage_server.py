@@ -200,10 +200,16 @@ def op_gcd(req):
 
 
 def op_lcm(req):
+    """lcm is variadic: the least common multiple of an arbitrary number of
+    polynomials. lcm(x, y, z) = x*y*z."""
     R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
-    return enc_poly(a.lcm(b))
+    args = req["args"]
+    if not args:
+        return enc_poly(R(1))
+    acc = decode_arg(args[0], R)
+    for a in args[1:]:
+        acc = acc.lcm(decode_arg(a, R))
+    return enc_poly(acc)
 
 
 def op_expand(req):
@@ -251,6 +257,13 @@ def op_degree(req):
         # Maple degree(p, [x,y,...]) / degree(p, {x,...}): the maximum total
         # degree among the listed variables over all monomials of p.
         if isinstance(a, dict) and "exprlist" in a:
+            # NOTE: Maple distinguishes a list [x,y] (order-sensitive VECTOR
+            # degree: degree(p,x1) + degree(lcoeff(p,x1),[x2..])) from a set
+            # {x,y} (total degree). We compute the total/max form for both. This
+            # is the correct answer for the set form; the list (vector) form is
+            # NOT exercised by DifferentialThomas (verified: no degree(p,[...])
+            # call sites in ~/DifferentialThomas/src), so the vector form is
+            # deliberately deferred rather than implemented.
             gens = [parse_in_ring(s, R) for s in a["exprlist"]]
             idxs = []
             for g in gens:
@@ -273,11 +286,24 @@ def op_degree(req):
 def op_ldegree(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
-    # low degree: minimal total/var degree of a monomial
+    # Maple: the identically-zero polynomial has ldegree +infinity (degree
+    # -infinity). DT compares ldegree only via >= so a sentinel would do, but
+    # match Maple exactly.
     if p == 0:
-        return enc_int(0)
+        return {"pos_infinity": True}
     if len(req["args"]) >= 2:
-        x = decode_arg(req["args"][1], R)
+        a = req["args"][1]
+        # list/set of variables: total (set) low degree — the minimal sum of the
+        # listed variables' exponents over all monomials. (The order-sensitive
+        # vector form for a list is not used by DT; the total form is correct for
+        # the set form and a safe non-crashing answer for the list form.)
+        if isinstance(a, dict) and "exprlist" in a:
+            gens = {str(g): i for i, g in enumerate(R.gens())}
+            idxs = [gens[s] for s in a["exprlist"] if s in gens]
+            if not idxs:
+                return enc_int(0)
+            return enc_int(min(sum(e[i] for i in idxs) for e in p.exponents()))
+        x = decode_arg(a, R)
         try:
             xi = R.gens().index(x)
         except Exception:
@@ -299,40 +325,111 @@ def op_coeff(req):
     # univariate polys take an integer degree; multivariate take {var: deg}.
     R = p.parent()
     if R.ngens() <= 1:
-        c = p[n]  # univariate index by degree
+        # honor x: if x is the sole generator, index by degree; if x is some
+        # other (absent) variable, coeff(p, x, 0) = p and coeff(p, x, n>0) = 0.
+        try:
+            xi = R.gens().index(x)
+        except (ValueError, Exception):
+            xi = None
+        if xi is not None:
+            c = p[n]  # univariate index by degree of the generator
+        else:
+            c = p if n == 0 else R(0)
     else:
         c = p.coefficient({x: n})
     return enc_poly(c)
 
 
+def _lcoeff_wrt_var(p, x, R):
+    """lcoeff(p, x) = coeff(p, x, degree(p, x)): the coefficient of the highest
+    power of x present, a polynomial in the remaining variables."""
+    if R.ngens() > 1:
+        d = p.degree(x)
+        return p.coefficient({x: d})
+    # univariate ring: honor x (== the sole generator) -> leading coefficient.
+    return p.leading_coefficient()
+
+
 def op_lcoeff(req):
+    """lcoeff(p [,x]): leading coefficient. With a single variable x, the
+    coefficient of the highest power of x. With a list/set [x1,...,xn], Maple's
+    nested-lexicographic leading coefficient:
+    lcoeff(p, [x1,...,xn]) = lcoeff(...lcoeff(p, x1)..., xn)."""
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    if len(req["args"]) >= 2 and R.ngens() > 1:
-        x = decode_arg(req["args"][1], R)
-        d = p.degree(x)
-        c = p.coefficient({x: d})
-        return enc_poly(c)
-    # univariate (or no var given): leading coefficient
+    if len(req["args"]) >= 2:
+        a = req["args"][1]
+        if isinstance(a, dict) and "exprlist" in a:
+            gens = {str(g): g for g in R.gens()}
+            c = p
+            for nm in a["exprlist"]:
+                g = gens.get(nm)
+                if g is None:
+                    continue
+                c = _lcoeff_wrt_var(c, g, c.parent())
+            return enc_poly(c)
+        x = decode_arg(a, R)
+        return enc_poly(_lcoeff_wrt_var(p, x, R))
+    # no var given: leading coefficient w.r.t. all indeterminates
     return enc_poly(p.leading_coefficient())
 
 
 def op_tcoeff(req):
+    """tcoeff(p, x): the TRAILING coefficient = coeff(p, x, ldegree(p, x)), i.e.
+    the coefficient of the LOWEST power of x present (NOT the constant term).
+    tcoeff(x^2+x, x) = 1, tcoeff(3x^3+5x^2, x) = 5. Without x, the trailing
+    coefficient w.r.t. all indeterminates."""
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    # trailing coefficient = constant term in the univariate sense; use the
-    # lowest-degree coefficient.
+    if len(req["args"]) >= 2:
+        x = decode_arg(req["args"][1], R)
+        if R.ngens() > 1:
+            try:
+                xi = R.gens().index(x)
+            except Exception:
+                xi = None
+            if xi is not None:
+                d = min(e[xi] for e in p.exponents())
+                return enc_poly(p.coefficient({x: d}))
+        else:
+            # univariate ring: coeff of lowest power of x
+            d = p.valuation()
+            return enc_poly(p[d])
+    # no variable: trailing coeff over the natural monomial order (lowest term).
     return enc_poly(p.constant_coefficient())
 
 
 def op_coeffs(req):
-    """coeffs(p [,vars]) -> list of coefficients."""
+    """coeffs(p, x) -> the coefficients of p w.r.t. the variable(s) x, each a
+    polynomial in the remaining variables. Without x, the numeric coefficients.
+
+    The optional 3rd by-name arg (term sequence) is not implemented — DT uses
+    only the coefficient set: {coeffs(collect(expand(p-q),s),s)}.
+
+    coeffs(-6x+3y+23x^2-4xyz+7z^2, x) -> {23, -4yz-6, 7z^2+3y}."""
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
+    if len(req["args"]) >= 2:
+        Vnames = _vnames_arg(req["args"][1])
+        gens = {str(g): i for i, g in enumerate(R.gens())}
+        V_idx = [gens[v] for v in Vnames if v in gens]
+        if V_idx:
+            V_set = set(V_idx)
+            ngens = R.ngens()
+            # Group p's terms by their V-exponent tuple; each group's value is
+            # the coefficient polynomial in the remaining variables.
+            groups = {}
+            for mon, c in p.dict().items():
+                exps = [int(mon)] if isinstance(mon, int) else list(mon)
+                rest_exp = [0 if i in V_set else exps[i] for i in range(ngens)]
+                term = c * R.monomial(*rest_exp)
+                vkey = tuple(exps[i] for i in V_idx)
+                groups[vkey] = groups.get(vkey, R(0)) + term
+            return enc_list([enc_poly(v) for v in groups.values()])
     coeffs = [enc_poly(c) for c in p.coefficients()]
     return enc_list(coeffs)
 
@@ -373,50 +470,101 @@ def op_divide(req):
     return {"divide": {"exact": bool(exact), "quotient": str(q)}}
 
 
+def _univariate_in_x(R, x):
+    """Build the univariate-in-x ring over the fraction field of the other
+    variables: Frac(QQ[other vars])[x]. This is the ring in which rem/quo/prem/
+    pquo must divide so that division is "treated as polynomials in x" with the
+    other variables living in the coefficients (Maple's a = b*q + r with
+    degree(r, x) < degree(b, x))."""
+    return PolynomialRing(FractionField(_coeff_ring_excluding(R, x)), str(x))
+
+
+def _back_to_R(R, e):
+    """Coerce an element of Frac(other)[x] (or its coefficients-over-Frac form)
+    back into the multivariate ring R, clearing any denominators that are pure
+    rationals. The results of rem/quo/prem/pquo on polynomials in x with
+    coefficients polynomial in the other vars are themselves polynomials in R."""
+    try:
+        return R(e)
+    except Exception:
+        pass
+    # e may be a univariate poly over Frac(other); rebuild term by term.
+    return R(SR(str(e)))
+
+
 def op_rem(req):
-    R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
-    _, r = a.quo_rem(b)
-    return enc_poly(r)
+    """rem(a, b, x): remainder of a divided by b as polynomials in x.
 
-
-def op_quo(req):
-    R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
-    q, _ = a.quo_rem(b)
-    return enc_poly(q)
-
-
-def _univariate(p, x, R):
-    """Return p as a univariate polynomial in x (over the multivariate
-    coefficient ring) for prem/pquo."""
-    return p.polynomial(x)
-
-
-def op_prem(req):
-    """pseudo-remainder prem(a, b, x)."""
+    a = b*q + r with degree(r, x) < degree(b, x); the coefficients live in the
+    other variables. The optional 4th arg 'q' (to receive the quotient) is not
+    supported here — DT uses only the 3-arg form."""
     R = make_ring(req["vars"])
     a = decode_arg(req["args"][0], R)
     b = decode_arg(req["args"][1], R)
     if len(req["args"]) >= 3:
         x = decode_arg(req["args"][2], R)
-        Ru = PolynomialRing(FractionField(_coeff_ring_excluding(R, x)), str(x))
-        au = Ru(a)
-        bu = Ru(b)
-        q, r = au.pseudo_quo_rem(bu)
-        return enc_poly(R(r.numerator()) if hasattr(r, 'numerator') else R(r))
-    q, r = a.pseudo_quo_rem(b)
+        Ru = _univariate_in_x(R, x)
+        au, bu = Ru(a), Ru(b)
+        _, r = au.quo_rem(bu)
+        return enc_poly(_back_to_R(R, r))
+    _, r = a.quo_rem(b)
     return enc_poly(r)
 
 
-def op_pquo(req):
+def op_quo(req):
+    """quo(a, b, x): quotient of a divided by b as polynomials in x. See op_rem
+    for the convention. The optional 4th arg 'r' is not supported (DT uses the
+    3-arg form)."""
     R = make_ring(req["vars"])
     a = decode_arg(req["args"][0], R)
     b = decode_arg(req["args"][1], R)
-    q, r = a.pseudo_quo_rem(b)
+    if len(req["args"]) >= 3:
+        x = decode_arg(req["args"][2], R)
+        Ru = _univariate_in_x(R, x)
+        au, bu = Ru(a), Ru(b)
+        q, _ = au.quo_rem(bu)
+        return enc_poly(_back_to_R(R, q))
+    q, _ = a.quo_rem(b)
     return enc_poly(q)
+
+
+def op_prem(req):
+    """pseudo-remainder prem(a, b, x): m*a = b*q + r with
+    m = lcoeff(b, x)^(deg(a,x) - deg(b,x) + 1), degree(r, x) < degree(b, x)."""
+    R = make_ring(req["vars"])
+    a = decode_arg(req["args"][0], R)
+    b = decode_arg(req["args"][1], R)
+    if len(req["args"]) >= 3:
+        x = decode_arg(req["args"][2], R)
+        Ru = _univariate_in_x(R, x)
+        au = Ru(a)
+        bu = Ru(b)
+        q, r = au.pseudo_quo_rem(bu)
+        return enc_poly(_back_to_R(R, r.numerator()) if hasattr(r, 'numerator')
+                        else _back_to_R(R, r))
+    # 2-arg fallback: no main variable supplied. Sage's multivariate ring has no
+    # .pseudo_quo_rem; require the explicit variable rather than guess a main
+    # variable (DT always calls the 3-arg form).
+    raise ValueError("prem(a, b) requires an explicit main variable x: "
+                     "use prem(a, b, x)")
+
+
+def op_pquo(req):
+    """pseudo-quotient pquo(a, b, x): the q in m*a = b*q + r (same convention as
+    prem). Like prem, must divide in the univariate-in-x ring."""
+    R = make_ring(req["vars"])
+    a = decode_arg(req["args"][0], R)
+    b = decode_arg(req["args"][1], R)
+    if len(req["args"]) >= 3:
+        x = decode_arg(req["args"][2], R)
+        Ru = _univariate_in_x(R, x)
+        au = Ru(a)
+        bu = Ru(b)
+        q, r = au.pseudo_quo_rem(bu)
+        return enc_poly(_back_to_R(R, q.numerator()) if hasattr(q, 'numerator')
+                        else _back_to_R(R, q))
+    raise ValueError("pquo(a, b) requires an explicit main variable x: "
+                     "use pquo(a, b, x)")
 
 
 def _coeff_ring_excluding(R, x):
@@ -533,12 +681,61 @@ def op_content(req):
     return enc_poly(_content_wrt(p, _vnames_arg(req["args"][1])))
 
 
+def _squarefree_via_factor(p):
+    """Square-free decomposition built from factor(): collect the irreducible
+    factors by multiplicity, multiplying together all irreducibles sharing a
+    multiplicity into one square-free factor. Works for both univariate and
+    multivariate rings (Sage's multivariate libsingular polynomials have factor()
+    but NOT squarefree_decomposition()). Returns (unit_str, [[fac_str, mult],...]).
+    """
+    F = p.factor()
+    R = p.parent()
+    by_mult = {}
+    for fac, mult in F:
+        by_mult[mult] = by_mult.get(mult, R(1)) * fac
+    unit = F.unit()
+    facs = [[str(by_mult[m]), int(m)] for m in sorted(by_mult)]
+    return str(unit), facs
+
+
 def op_sqrfree(req):
+    """sqrfree(p [,x]): square-free factorization. With a main variable (or
+    list/set of variables) x, p is treated as a polynomial in x with the other
+    variables as coefficients, so e.g. sqrfree(f,x) and sqrfree(f,y) differ.
+    Keeps the {unit, factors:[[f,m],...]} return shape.
+
+    The decomposition is computed via factor() (grouping irreducibles by
+    multiplicity), since Sage's multivariate polynomials lack
+    squarefree_decomposition(). Unit / content placement may differ from Maple's
+    exact textual output, but the product reconstructs p and the factor
+    multiplicities (the square-free structure) match."""
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
-    F = p.squarefree_decomposition()
-    facs = [[str(fac), int(mult)] for (fac, mult) in F]
-    return {"factors": {"unit": str(F.unit()), "factors": facs}}
+    if len(req["args"]) >= 2:
+        Vnames = _vnames_arg(req["args"][1])
+        gens = {str(g): g for g in R.gens()}
+        Vgens = [gens[v] for v in Vnames if v in gens]
+        others = [g for g in R.gens() if g not in set(Vgens)]
+        if Vgens and others:
+            # Square-free factorization treating only the main variable(s) as
+            # indeterminates: move to Frac(QQ[others])[Vgens] where the other
+            # variables live in the coefficient field. (When there are no other
+            # variables, every variable is an indeterminate -> the full-ring
+            # path below, which is what Maple's sqrfree(f, x, y) does too.)
+            base = FractionField(PolynomialRing(QQ, [str(g) for g in others]))
+            Rv = PolynomialRing(base, [str(g) for g in Vgens])
+            pv = Rv(p)
+            if Rv.ngens() <= 1:
+                F = pv.squarefree_decomposition()
+                facs = [[str(R(SR(str(fac)))), int(mult)] for (fac, mult) in F]
+                unit = F.unit()
+                ustr = str(unit) if unit in (1, -1) else str(R(SR(str(unit))))
+                return {"factors": {"unit": ustr, "factors": facs}}
+            unit, facs = _squarefree_via_factor(pv)
+            facs = [[str(R(SR(f))), m] for (f, m) in facs]
+            return {"factors": {"unit": unit, "factors": facs}}
+    unit, facs = _squarefree_via_factor(p)
+    return {"factors": {"unit": unit, "factors": facs}}
 
 
 def op_resultant(req):

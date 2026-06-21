@@ -504,6 +504,13 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 			}
 			items[i] = v
 		}
+		// Maple's coeffs returns an expression SEQUENCE, not a list, so that
+		// {coeffs(p, x)} forms a set of the coefficients (DT's usage:
+		// {coeffs(collect(expand(p-q),s),s)}). A List would give a set of one
+		// list. Every other list-returning op (indets, ...) keeps the List form.
+		if op == "coeffs" {
+			return Seq{items}, nil
+		}
 		return List{items}, nil
 	}
 	if r, ok := m["factors"]; ok {
@@ -531,13 +538,18 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 	if _, ok := m["infinity"]; ok {
 		return Name{"infinity"}, nil
 	}
+	if _, ok := m["pos_infinity"]; ok {
+		// Maple +infinity (ldegree of the zero polynomial). Positive analog of
+		// neg_infinity; same surface form as a bare "infinity".
+		return Name{"infinity"}, nil
+	}
 	return nil, fmt.Errorf("unrecognized sage result for %s: %s", op, raw)
 }
 
 // decodeFactors builds Maple's factors() return form: [unit, [[f,m],...]].
 func (s *SageBackend) decodeFactors(raw json.RawMessage, san *sanitizer) (Value, error) {
 	var f struct {
-		Unit    string          `json:"unit"`
+		Unit    string              `json:"unit"`
 		Factors [][]json.RawMessage `json:"factors"`
 	}
 	if err := json.Unmarshal(raw, &f); err != nil {
@@ -844,7 +856,7 @@ func (s *sanitizer) parseBack(str string) (Value, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reparse sage output %q: %w", str, err)
 	}
-	tmp := NewInterp() // fresh interp: unbound names stay symbolic
+	tmp := NewInterp()    // fresh interp: unbound names stay symbolic
 	tmp.inertParse = true // already-reduced Sage output: don't re-dispatch CAS ops
 	v, err := tmp.execBlock(root.nodes)
 	if err != nil {
