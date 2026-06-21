@@ -252,7 +252,9 @@ func (it *Interp) eval(n *tree) (Value, error) {
 	case moduleNode:
 		return nil, errUnimplemented("module evaluation")
 	case readNode:
-		return nil, errUnimplemented("read")
+		return it.evalRead(n)
+	case saveNode:
+		return it.evalSave(n)
 	default:
 		return nil, errUnimplemented("eval " + n.group.String())
 	}

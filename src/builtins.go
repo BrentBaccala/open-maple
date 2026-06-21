@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
+	"syscall"
 )
 
 // registerBuiltins installs all Go-implemented language builtins.
@@ -46,6 +48,7 @@ func registerBuiltins(it *Interp) {
 	reg("printf", biPrintf)
 	reg("sprintf", biSprintf)
 	reg("time", biTime)
+	reg("currentdir", biCurrentdir)
 	reg("sort", biSort)
 	reg("nprintf", biNprintf)
 	reg("max", biMax)
@@ -1344,7 +1347,36 @@ func mapleSprintf(format string, args []Value) string {
 }
 
 func biTime(it *Interp, args []Value) (Value, error) {
-	return Float{0}, nil // stub
+	// Maple's time() returns total CPU seconds consumed by the session. getrusage
+	// RUSAGE_SELF gives user+system CPU since process start — exactly that. The
+	// worksheets use it only as `time() - st` to report an elapsed duration.
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return Float{0}, nil
+	}
+	secs := float64(ru.Utime.Sec) + float64(ru.Utime.Usec)/1e6 +
+		float64(ru.Stime.Sec) + float64(ru.Stime.Usec)/1e6
+	return Float{secs}, nil
+}
+
+// biCurrentdir implements Maple's currentdir(): with no argument it returns the
+// current working directory; with a string argument it changes to that directory
+// and returns the *previous* one.
+func biCurrentdir(it *Interp, args []Value) (Value, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("currentdir: %v", err)
+	}
+	if len(args) >= 1 {
+		dir, ok := nameOrStr(args[0])
+		if !ok {
+			return nil, fmt.Errorf("currentdir: argument must be a string")
+		}
+		if err := os.Chdir(dir); err != nil {
+			return nil, fmt.Errorf("currentdir: %v", err)
+		}
+	}
+	return MString{cwd}, nil
 }
 
 // ---- sort -------------------------------------------------------------------

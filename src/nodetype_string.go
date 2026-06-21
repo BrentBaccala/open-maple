@@ -44,6 +44,7 @@ func _() {
 	_ = x[nextNode-32]
 	_ = x[readNode-33]
 	_ = x[emptyNode-34]
+	_ = x[saveNode-35]
 }
 
 var _nodeType_names = []string{
@@ -54,6 +55,7 @@ var _nodeType_names = []string{
 	"returnNode", "errorNode", "tryNode", "useNode", "moduleNode",
 	"rangeNode", "arrowNode", "typeNode", "memberNode", "unaryNode",
 	"matrixNode", "breakNode", "nextNode", "readNode", "emptyNode",
+	"saveNode",
 }
 
 func (i nodeType) String() string {

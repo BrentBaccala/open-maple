@@ -43,6 +43,19 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		if len(args) == 1 {
 			v, ok = nativeExpand(args[0])
 		}
+	case "evala":
+		// With no algebraic numbers (RootOf) in play — the only case this port
+		// supports — evala(p) just normalizes p to expanded standard form, which
+		// is exactly native expand on a polynomial. DT calls it as
+		// evala(expand(...)) and evala(StandardForm(p)/c) (polynomial over a
+		// rational content), both of which toPolyNF handles. A genuine rational
+		// function or any RootOf input falls through to Sage. This is also a large
+		// perf/robustness win: evala on a fully-expanded polynomial was the op
+		// that round-tripped a huge term-string to Sage, where CPython's compiler
+		// overflowed its recursion limit parsing it (the hydrogen ansatz).
+		if len(args) == 1 {
+			v, ok = nativeExpand(args[0])
+		}
 	case "coeff":
 		v, ok = nativeCoeff(args)
 	case "numer":

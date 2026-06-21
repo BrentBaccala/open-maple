@@ -672,4 +672,17 @@ def main():
 
 
 if __name__ == "__main__":
+    # Some DT ops hand us very large *flat* expressions — a fully expanded
+    # polynomial with thousands of '+'-joined terms (e.g. the hydrogen ansatz's
+    # constancy/Vf substitutions). Sage's string parsing routes through Python's
+    # sage_eval -> compile(), and CPython's bytecode compiler recurses once per
+    # AST node, overflowing the default 1000-deep limit ("maximum recursion depth
+    # exceeded during compilation") on such a sum. Raise the recursion limit so
+    # those parses succeed. We must stay on the main thread (Sage's cysignals
+    # SIGSEGV/SIGINT handling segfaults off-thread), so we cannot enlarge the C
+    # stack; this limit is chosen to clear the expressions seen here while
+    # staying well short of a C-stack overflow. Native-Go handling of the cheap
+    # ops (incl. evala) avoids most of these round-trips entirely; this is the
+    # backstop for ops that genuinely need Sage on a big expression.
+    sys.setrecursionlimit(100000)
     main()

@@ -46,6 +46,7 @@ const (
 	nextNode                  // next
 	readNode                  // read "file"
 	emptyNode                 // empty statement / NULL placeholder
+	saveNode                  // save name, ..., "file"
 )
 
 type tree struct {
@@ -189,6 +190,8 @@ func (p *parser_t) parseStatement() (*tree, error) {
 			return &tree{group: nextNode}, nil
 		case "read":
 			return p.parseRead()
+		case "save":
+			return p.parseSave()
 		case "quit", "done", "stop":
 			p.next()
 			return &tree{group: emptyNode, value: "quit"}, nil
@@ -274,6 +277,31 @@ func (p *parser_t) parseRead() (*tree, error) {
 		return nil, err
 	}
 	return &tree{group: readNode, nodes: []*tree{arg}}, nil
+}
+
+// parseSave handles `save e1, e2, ..., eN, "file";` — Maple writes the named
+// objects e1..e(N-1) to the file named by eN. The names are saved in
+// re-readable assignment form (so a later `read` of the same file rebinds them);
+// the trailing filename is the only argument that is evaluated to a string.
+func (p *parser_t) parseSave() (*tree, error) {
+	p.next() // save
+	node := &tree{group: saveNode}
+	for {
+		if p.cur().group == statementDelim || isBlockTerminator(p.cur()) {
+			break
+		}
+		arg, err := p.parseExpr(bpComma)
+		if err != nil {
+			return nil, err
+		}
+		node.nodes = append(node.nodes, arg)
+		if p.cur().group == comma {
+			p.next()
+			continue
+		}
+		break
+	}
+	return node, nil
 }
 
 func (p *parser_t) parseReturn() (*tree, error) {
