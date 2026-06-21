@@ -171,7 +171,7 @@ func (s *SageBackend) roundtrip(req *sageRequest) (*sageResponse, error) {
 
 	if os.Getenv("OPENMAPLE_SAGE_TRACE") != "" {
 		sageCallCount++
-		fmt.Fprintf(stderrW(), "[sage %d] %s\n", sageCallCount, req.Op)
+		fmt.Fprintf(stderrW(), "[sage %d] %s vars=%v args=%s\n", sageCallCount, req.Op, req.Vars, req.Args)
 	}
 
 	if err := s.ensureStarted(); err != nil {

@@ -48,6 +48,9 @@ const (
 	bpType   = 58
 	bpPow    = 70
 	bpCompose = 75
+	// bpNeg — prefix +/- bind looser than ^ so -b^2 parses as -(b^2), not
+	// (-b)^2. (Just below bpPow, mirroring ^'s right operand at bpPow-1.)
+	bpNeg    = bpPow - 1
 	bpUnary  = 80
 	bpDot    = 85
 	bpPostfix = 90
@@ -263,14 +266,14 @@ func (p *parser_t) parseNud() (*tree, error) {
 		switch t.value {
 		case "-":
 			p.next()
-			operand, err := p.parseExpr(bpUnary)
+			operand, err := p.parseExpr(bpNeg)
 			if err != nil {
 				return nil, err
 			}
 			return &tree{group: unaryNode, value: "-", nodes: []*tree{operand}}, nil
 		case "+":
 			p.next()
-			operand, err := p.parseExpr(bpUnary)
+			operand, err := p.parseExpr(bpNeg)
 			if err != nil {
 				return nil, err
 			}
