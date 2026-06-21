@@ -151,35 +151,21 @@ def check_B_reverse(prob, prolong_order=2):
     for ci, cell in enumerate(prob.cells, 1):
         eqs = cell["equations"]
         ineqs = cell["inequations"]
-        # Non-vacuity.  A triangular set with distinct leaders and nonzero initials
-        # (check A) is automatically consistent — one can back-solve each leader —
-        # UNLESS one of its inequations is forced to 0 on the equation locus.  So
-        # non-vacuity reduces to: check A held (assumed; run A first) AND no cell
-        # inequation reduces to 0 modulo the cell equations.  The inequation
-        # reduction reuses the cheap parameter-in-field reducer.  No need for a
-        # unit-ideal GB over the whole cell (which is expensive on dense cells).
-        ineq_zero = False
-        which = None
-        if ineqs:
-            try:
-                cell_strs = {"equations": [maple_parse.normalize_poly_string(str(e)) for e in eqs]}
-                ineq_strs = [maple_parse.normalize_poly_string(str(q)) for q in ineqs]
-                red, parse, nv = vc.cell_field_reducer(cell_strs, ivars, prolong_order=0,
-                                                       extra_strs=ineq_strs)
-                for k, q in enumerate(ineq_strs):
-                    if red(q) == 0:
-                        ineq_zero = True
-                        which = k
-                        break
-            except Exception:
-                ineq_zero = vc.saturated_empty(prob.R, eqs,
-                                               ineqs + vc._ivar_gens(prob, prob.R))
-        if ineq_zero:
+        # Non-vacuity: the system { eqs = 0, ineqs != 0, ivars != 0 } must have a
+        # solution.  Use the trustworthy FULL-RING saturated_empty (Rabinowitsch +
+        # one Groebner basis) — it is the correct, sound test and, for these
+        # mostly-linear cells, is fast (~0 s/cell).  NOTE: the parameter-in-field
+        # reducer must NOT be used here — at prolong_order 0 it spuriously reduces
+        # an unconstrained inequation jet (e.g. DDPs_y) to 0 and false-flags a
+        # consistent cell as vacuous (verified against the full-ring test).
+        sats = ineqs + vc._ivar_gens(prob, prob.R)
+        empty = vc.saturated_empty(prob.R, eqs, sats)
+        if empty:
             allpass = False
-            lines.append("  cell %d: VACUOUS (inequation[%s] reduces to 0 on the cell) — spurious"
-                         % (ci, which))
+            lines.append("  cell %d: VACUOUS (inconsistent system, no solution) — spurious"
+                         % ci)
         else:
-            lines.append("  cell %d: non-vacuous (triangular + no inequation vanishes)" % ci)
+            lines.append("  cell %d: non-vacuous (consistent)" % ci)
     return allpass, "\n".join(lines)
 
 

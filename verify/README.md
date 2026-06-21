@@ -23,11 +23,24 @@ only *upstream*, to produce the decomposition data (`hydrogen_thomas_result.m`).
 ## Representation
 
 Jet variables `name[i,j,k]` are flattened to algebraic indeterminates
-`name__i_j_k`. Everything lives in a single ring `QQ[x, y, z, <jets>]` with
-DegRevLex order; the independent variables `x,y,z` are ordinary ring variables,
-and the fact that they are *units in the coefficient field* (the basis for content
-removal) is modelled by **saturating every ideal by the product of the ivars** in
-addition to the cell's inequations.
+`name__i_j_k`. Two ring strategies are used:
+
+- **Full ring** `QQ[x, y, z, <jets>]` (DegRevLex): used for disjointness (C) and
+  non-vacuity, with the ivars as ordinary ring variables and their unit-status
+  modelled by **saturating by the product of the ivars** plus the cell's
+  inequations (Rabinowitsch). Sound but, at 60+ variables, slow for the dense
+  cells.
+- **Parameter-in-field ring**: for soundness (B) and passivity (E), the constant
+  parameters (dvars constrained only by constancy) and the ivars are moved into
+  the *coefficient field* `K = Frac(QQ[ivars, params])`, leaving only the ~15-25
+  genuine jet unknowns as ring variables. Because the cell-equation initials are
+  polynomials in the parameters, they become **field units**, so a plain Gröbner
+  ideal membership over this small ring equals the saturated-by-initials
+  membership — i.e. exact "pseudo-reduces to 0 modulo the cell" — at a fraction of
+  the cost. **Caveat:** the parameter-in-field collapse is sound for *membership*
+  (does an input eq reduce to 0) but **not** for *non-vacuity* (it can spuriously
+  reduce an unconstrained inequation jet to 0 and false-flag a consistent cell);
+  non-vacuity therefore uses the full-ring `saturated_empty`.
 
 ## Files
 
