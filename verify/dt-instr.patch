@@ -1,0 +1,57 @@
+diff -ru a/main b/main
+--- a/main	2026-06-21 18:19:50.263465843 -0400
++++ b/main	2026-06-21 18:19:50.291465850 -0400
+@@ -461,6 +461,7 @@
+     if `@@PACKAGE@@/Equation`(q) then
+       if `@@PACKAGE@@/StandardForm`(q)<>0 then 
+         if `@@PACKAGE@@/IsDifferentialFieldElement`(q) then
++          printf("OMRI_RECORD|field_element|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+           DifferentialSystem['Inconsistent']:=true;
+           return `@@PACKAGE@@/ReturnInDoNextStepAndSetOrders`(DifferentialSystem,result);
+         elif not `@@PACKAGE@@/NonZeroInitial`(q) then
+@@ -486,6 +487,7 @@
+ 
+     else#q is an inequation
+       if `@@PACKAGE@@/StandardForm`(q)=0 then
++        printf("OMRI_RECORD|inequation_zero|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+         DifferentialSystem['Inconsistent']:=true;
+         return `@@PACKAGE@@/ReturnInDoNextStepAndSetOrders`(DifferentialSystem,result);
+       elif not `@@PACKAGE@@/IsDifferentialFieldElement`(q) then
+@@ -507,6 +509,7 @@
+           #then dividing p*q by q and stuck with p=0 as equation, i proove, that this suffices without needing a new prolongation:
+           #p'=0  <=>(q'<>0)  p'*q=0  <=>(p=0)  p'*q+p*q'=(p*q)'=0
+           if deg<>`@@PACKAGE@@/Rank`(p) or leader<>`@@PACKAGE@@/Leader`(p) then
++            printf("OMRI_RECORD|rank_leader_change|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(p), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+             DifferentialSystem['Inconsistent']:=true;
+           else
+             `@@PACKAGE@@/InsertIntoJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),p);
+diff -ru a/reduction b/reduction
+--- a/reduction	2026-06-21 18:19:50.317465856 -0400
++++ b/reduction	2026-06-21 18:19:50.340465862 -0400
+@@ -569,6 +569,7 @@
+   while savedstdform<>`@@PACKAGE@@/StandardForm`(q) do
+     if `@@PACKAGE@@/IsDifferentialFieldElement`(q) then
+       if `@@PACKAGE@@/InconsistentPolynom`(q) then
++        printf("OMRI_RECORD|field_element|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+         DifferentialSystem['Inconsistent']:=true;
+       fi;
+       return result;
+@@ -620,6 +621,7 @@
+     q:=eval(`@@PACKAGE@@/ReduceNonLinearTailWRTJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),q,DifferentialSystem['Ranking']['MaxSizeMultiplicator']));
+     
+     if `@@PACKAGE@@/Leader`(q)<>oldleader or oldrank<>`@@PACKAGE@@/Rank`(q) then
++      printf("OMRI_RECORD|rank_leader_change|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+       DifferentialSystem['Inconsistent']:=true;
+       userinfo(3,@@PACKAGE@@,`found inconsistent system from tailreduction`);
+       return NULL;#return result not needed here, since the other systems have to come from factorization and these are also inconsistent
+diff -ru a/strategy b/strategy
+--- a/strategy	2026-06-21 18:19:50.362465868 -0400
++++ b/strategy	2026-06-21 18:19:50.381465873 -0400
+@@ -26,6 +26,7 @@
+   while leader=1 and nops(DifferentialSystem['Q'])>0 do
+     if `@@PACKAGE@@/IsDifferentialFieldElement`(DifferentialSystem['Q'][1]) then
+       if (`@@PACKAGE@@/Equation`(DifferentialSystem['Q'][1]) and `@@PACKAGE@@/StandardForm`(DifferentialSystem['Q'][1])<>0) or (`@@PACKAGE@@/Inequation`(DifferentialSystem['Q'][1]) and `@@PACKAGE@@/StandardForm`(DifferentialSystem['Q'][1])=0) then
++        printf("OMRI_RECORD|leading_field_element|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(DifferentialSystem['Q'][1]), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+         DifferentialSystem['Inconsistent']:=true;
+         DifferentialSystem['Q']:=[];
+         return NULL;
