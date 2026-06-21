@@ -181,6 +181,23 @@ func (it *Interp) iterateBinder(binder, body *tree, combine func([]Value) (Value
 	var varName string
 	var results []Value
 
+	// The loop variable is local to the seq/add/mul: Maple does not leak it to the
+	// enclosing scope. Save its prior binding and restore it on exit (unassigning
+	// it — store the self-name — if it had none). Without this, e.g.
+	// seq(diff(p(x),x), p in pars) leaves p bound to the last param globally, which
+	// then shadows an inner proc's own `p` parameter inside a captured lambda.
+	if binder.group == operate && (binder.value == "=" || binder.value == "in") {
+		lv := stripBacktick(binder.nodes[0].value)
+		old, had := it.lookupRaw(lv)
+		defer func() {
+			if had {
+				it.store(lv, old)
+			} else {
+				it.store(lv, Name{lv})
+			}
+		}()
+	}
+
 	runOne := func() error {
 		v, err := it.eval(body)
 		if err != nil {

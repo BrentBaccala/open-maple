@@ -1275,30 +1275,47 @@ func mapleSprintf(format string, args []Value) string {
 	for i := 0; i < len(format); i++ {
 		c := format[i]
 		if c == '%' && i+1 < len(format) {
-			i++
+			// consume an optional flags/width/precision run, e.g. -5, 08, .1, +.3
+			mods := ""
+			j := i + 1
+			for j < len(format) && strings.IndexByte("-+ 0#.0123456789", format[j]) >= 0 {
+				mods += string(format[j])
+				j++
+			}
+			if j >= len(format) {
+				b.WriteByte('%')
+				continue
+			}
+			i = j
 			spec := format[i]
 			switch spec {
 			case '%':
 				b.WriteByte('%')
 			case 's':
 				if ai < len(args) {
-					b.WriteString(plainText(args[ai]))
+					b.WriteString(fmt.Sprintf("%"+mods+"s", plainText(args[ai])))
 					ai++
 				}
 			case 'a', 'q', 'v':
 				if ai < len(args) {
-					b.WriteString(printValue(args[ai]))
+					b.WriteString(fmt.Sprintf("%"+mods+"s", printValue(args[ai])))
 					ai++
 				}
 			case 'd':
 				if ai < len(args) {
-					b.WriteString(plainText(args[ai]))
+					if mods == "" {
+						b.WriteString(plainText(args[ai]))
+					} else if iv, ok := intVal(args[ai]); ok {
+						b.WriteString(fmt.Sprintf("%"+mods+"s", iv.String()))
+					} else {
+						b.WriteString(plainText(args[ai]))
+					}
 					ai++
 				}
 			case 'g', 'f', 'e':
 				if ai < len(args) {
 					if f, ok := toFloat(args[ai]); ok {
-						b.WriteString(fmt.Sprintf("%"+string(spec), f))
+						b.WriteString(fmt.Sprintf("%"+mods+string(spec), f))
 					} else {
 						b.WriteString(printValue(args[ai]))
 					}
@@ -1306,6 +1323,7 @@ func mapleSprintf(format string, args []Value) string {
 				}
 			default:
 				b.WriteByte('%')
+				b.WriteString(mods)
 				b.WriteByte(spec)
 			}
 		} else if c == '\\' && i+1 < len(format) {

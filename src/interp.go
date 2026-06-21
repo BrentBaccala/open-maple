@@ -336,13 +336,21 @@ func (it *Interp) lookup(name string) (Value, bool) {
 			v, ok := it.scope.locals[name]
 			return v, ok
 		}
-		// a global package name always wins over a captured closure value (DT
-		// package procs like `DifferentialThomas/Foo` are globals).
+		// Lexical closure: a captured binding (an enclosing proc's local/param at
+		// construction time, e.g. DiffVarList's `p` referenced inside its select
+		// lambda) shadows a global of the same plain name. Without this, a global
+		// left over from a seq loop variable would capture the lambda instead.
+		// EXCEPTION: a qualified package name (DifferentialThomas/Foo) is always the
+		// live global proc — never a captured local — so globals win for those.
+		qualified := strings.Contains(name, "/")
+		if !qualified && it.scope.captured != nil {
+			if v, ok := it.scope.captured[name]; ok {
+				return v, ok
+			}
+		}
 		if v, ok := it.globals[name]; ok {
 			return v, ok
 		}
-		// lexical-closure fallback: a free name bound in the enclosing proc at
-		// construction time (e.g. dvar/ivar inside IsDifferentialVariable2).
 		if it.scope.captured != nil {
 			if v, ok := it.scope.captured[name]; ok {
 				return v, ok

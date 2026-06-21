@@ -115,6 +115,18 @@ func (it *Interp) evalCall(n *tree) (Value, error) {
 				}
 				return b.Fn(it, args)
 			}
+			// Head name bound to another name — e.g. an arrow-function parameter
+			// applied as a function: (s -> s(x))(Vf) must give Vf(x), and
+			// seq(diff(p(x),x), p in pars) must substitute each param. Re-dispatch
+			// through the resolved name (which may itself be a proc, builtin, or an
+			// inert applied function).
+			if nm, ok := val.(Name); ok && nm.Val != name {
+				args, err := it.evalArgs(n.nodes[1:])
+				if err != nil {
+					return nil, err
+				}
+				return it.applyValue(nm, args, headNode)
+			}
 		}
 		// Package-export resolution: a bare name that is an exported short name of
 		// a loaded package (e.g. DT's PrettyPrintDifferentialSystem calls bare
