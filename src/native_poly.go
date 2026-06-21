@@ -49,6 +49,10 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		v, ok = nativeNumerDenom(args, true)
 	case "denom":
 		v, ok = nativeNumerDenom(args, false)
+	case "content":
+		if len(args) >= 1 {
+			v, ok = nativeContent(args[0])
+		}
 	case "normal", "simplify":
 		// On a scalar/atom (constant or a single name/jet variable) normal and
 		// simplify are the identity — there is nothing to combine or reduce. A
@@ -182,6 +186,16 @@ func toPolyNF(v Value) (*polyNF, bool) {
 		}
 		return acc, true
 	case *Power:
+		// A constant base with ANY integer exponent (incl. negative, e.g. 2^-1
+		// from x/2 = x*2^-1) is a rational constant.
+		if c, ok := toRat(n.Base); ok {
+			if e, ok := signedIntExp(n.Exp); ok {
+				if val, ok := ratPow(c, e); ok {
+					p.add(nfMono{}, val)
+					return p, true
+				}
+			}
+		}
 		e, ok := nonNegIntExp(n.Exp)
 		if !ok {
 			return nil, false
@@ -495,6 +509,33 @@ func nativeNumerDenom(args []Value, isNumer bool) (Value, bool) {
 	return nil, false
 }
 
+// nativeContent implements content(p) — the positive rational gcd of p's
+// numeric coefficients (gcd of numerators / lcm of denominators). This matches
+// the Sage backend's op_content, which computes the numeric content over the
+// whole ring and IGNORES the variable argument (so content(6*x*y+9*y, x) = 3,
+// not 3*y); native ignores args[1:] likewise. content is the single most
+// frequent CAS op on the multi-variable systems. content(0) = 0. A non-
+// polynomial argument returns ok=false → Sage.
+func nativeContent(p0 Value) (Value, bool) {
+	p, ok := toPolyNF(p0)
+	if !ok {
+		return nil, false
+	}
+	if len(p.coeff) == 0 {
+		return newInt(0), true
+	}
+	numGCD := new(big.Int) // 0; gcd(0,n)=n bootstraps the fold
+	denLCM := big.NewInt(1)
+	for _, c := range p.coeff {
+		n := new(big.Int).Abs(c.Num())
+		d := c.Denom() // big.Rat is always normalized, denom > 0
+		numGCD.GCD(nil, nil, numGCD, n)
+		g := new(big.Int).GCD(nil, nil, denLCM, d)
+		denLCM.Mul(denLCM, new(big.Int).Quo(d, g)) // lcm = denLCM * d / gcd
+	}
+	return normRat(new(big.Rat).SetFrac(numGCD, denLCM)), true
+}
+
 // fromPolyNF reconstructs a Value AST (Sum/Prod/Power/atoms/number) from a
 // normal form, in the deterministic comparePolyNF key order. Equality is
 // order-independent (compareValues), so the chosen order only affects the
@@ -585,6 +626,39 @@ func polyAtom(v Value) (Value, bool) {
 		return v, true
 	}
 	return nil, false
+}
+
+// signedIntExp returns the exponent as a (possibly negative) int64.
+func signedIntExp(v Value) (int64, bool) {
+	i, ok := v.(Integer)
+	if !ok || !i.Val.IsInt64() {
+		return 0, false
+	}
+	return i.Val.Int64(), true
+}
+
+// ratPow computes c^e for a rational c and integer e (negative e -> reciprocal).
+// ok=false for 0 raised to a negative power.
+func ratPow(c *big.Rat, e int64) (*big.Rat, bool) {
+	if e == 0 {
+		return big.NewRat(1, 1), true
+	}
+	neg := e < 0
+	if neg {
+		if c.Sign() == 0 {
+			return nil, false
+		}
+		e = -e
+	}
+	res := big.NewRat(1, 1)
+	base := new(big.Rat).Set(c)
+	for ; e > 0; e-- {
+		res.Mul(res, base)
+	}
+	if neg {
+		res.Inv(res)
+	}
+	return res, true
 }
 
 // nonNegIntExp returns the exponent as a non-negative int64, ok=false otherwise.
