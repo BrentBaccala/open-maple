@@ -56,6 +56,8 @@ func registerBuiltins(it *Interp) {
 	reg("evalf", biEvalf)
 	reg("table", biTable)
 	reg("array", biArray)
+	reg("with", biWith)
+	reg("whattype", biWhattype)
 	reg("subsindets", biSubsindets)
 	reg("piecewise", biPiecewise)
 	reg("ListTools:-Search", biListSearch)
@@ -1567,6 +1569,80 @@ func biArray(it *Interp, args []Value) (Value, error) {
 		}
 	}
 	return t, nil
+}
+
+// biWith implements with(Package): load a package and bring its exports into
+// scope. Only DifferentialThomas is supported — it loads the source (if not
+// already) and registers the public API names. Returns NULL (Maple returns the
+// export list; the example programs end the statement with ':' so it's unused).
+func biWith(it *Interp, args []Value) (Value, error) {
+	if len(args) == 0 {
+		return NULL(), nil
+	}
+	name, _ := nameOrStr(args[0])
+	if name == "DifferentialThomas" {
+		// load only once: ComputeRanking already bound means it's loaded.
+		if _, ok := it.globals["DifferentialThomas/ComputeRanking"]; !ok {
+			if err := it.LoadDifferentialThomas(defaultDTSrcDir()); err != nil {
+				return nil, err
+			}
+		}
+		it.registerDTPublicAPI()
+		return NULL(), nil
+	}
+	return nil, newMapleError("with: unsupported package " + name)
+}
+
+// biWhattype returns Maple's structural type name of its argument (the head /
+// constructor): integer, fraction, string, list, set, exprseq, `+`, `*`, `^`,
+// function, indexed, `=`, symbol, etc.
+func biWhattype(it *Interp, args []Value) (Value, error) {
+	if len(args) != 1 {
+		return nil, newMapleError("whattype expects one argument")
+	}
+	return Name{whatType(args[0])}, nil
+}
+
+func whatType(v Value) string {
+	switch v.(type) {
+	case Integer:
+		return "integer"
+	case Rational:
+		return "fraction"
+	case Float:
+		return "float"
+	case MString:
+		return "string"
+	case Boolean:
+		return "symbol" // true/false are symbols in Maple's whattype
+	case Name:
+		return "symbol"
+	case List:
+		return "list"
+	case Set:
+		return "set"
+	case Seq:
+		return "exprseq"
+	case *Sum:
+		return "+"
+	case *Prod:
+		return "*"
+	case *Power:
+		return "^"
+	case *Func:
+		return "function"
+	case *Indexed:
+		return "indexed"
+	case *Equation:
+		return "="
+	case *Range:
+		return ".."
+	case *Table:
+		return "table"
+	case *Proc:
+		return "procedure"
+	}
+	return "symbol"
 }
 
 func biSubsindets(it *Interp, args []Value) (Value, error) {

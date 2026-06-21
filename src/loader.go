@@ -53,7 +53,41 @@ func (it *Interp) LoadDifferentialThomas(srcDir string) error {
 	if _, err := it.Exec("`DifferentialThomas/initialized` <> 'true' and `DifferentialThomas/init`():"); err != nil {
 		return fmt.Errorf("DifferentialThomas/init: %w", err)
 	}
+	it.registerDTPublicAPI()
 	return nil
+}
+
+// dtPublicAPI maps the user-facing names that `with(DifferentialThomas)` exports
+// (and that the example programs call) to the internal package procs. The
+// readable source uses the longer internal names (ComputeRanking,
+// DifferentialThomasDecomposition, DifferentialSystemEquations); the compiled
+// .lib the examples target exposes the shorter public spellings.
+var dtPublicAPI = map[string]string{
+	"Ranking":                         "DifferentialThomas/ComputeRanking",
+	"ThomasDecomposition":             "DifferentialThomas/DifferentialThomasDecomposition",
+	"DifferentialThomasDecomposition": "DifferentialThomas/DifferentialThomasDecomposition",
+	"Equations":                       "DifferentialThomas/DifferentialSystemEquations",
+	"Inequations":                     "DifferentialThomas/DifferentialSystemInequations",
+}
+
+// registerDTPublicAPI binds the public DifferentialThomas API names to their
+// internal procs via the package-export map (consulted by evalCall when a plain
+// name isn't a local/global/builtin), so e.g. Ranking([x],[u]) dispatches to
+// `DifferentialThomas/ComputeRanking`.
+func (it *Interp) registerDTPublicAPI() {
+	for short, qual := range dtPublicAPI {
+		it.exports[short] = qual
+	}
+}
+
+// defaultDTSrcDir is the DifferentialThomas source directory used by the `with`
+// builtin and the file runner. Overridable via DT_SRC.
+func defaultDTSrcDir() string {
+	if d := os.Getenv("DT_SRC"); d != "" {
+		return d
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "DifferentialThomas", "src")
 }
 
 // CountDefinedProcs counts global names bound to a Proc value (the package's
