@@ -58,7 +58,7 @@ var casOps = map[string]bool{
 	"RootOf": true, "evala": true, "radnormal": true, "minpoly": true,
 	"solve": true, "fsolve": true, "isolve": true,
 	// linear algebra (Matrix-valued)
-	"Matrix": true, "Vector": true, "array": true, "Array": true,
+	"Matrix": true, "Vector": true, "Array": true,
 	"LinearSolve": true, "LUDecomposition": true,
 	// misc numeric/special
 	"binomial": true, "GAMMA": true,

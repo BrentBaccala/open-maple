@@ -617,6 +617,30 @@ func (it *Interp) resolveAssignTable(base *tree) (*Table, error) {
 		it.store(name, tbl)
 		return tbl, nil
 	case indexNode:
+		// The inner container may be a list whose element IS a table, as in DT's
+		// InequationLCM: result[-1]['Q'] := v, where result is a list and
+		// result[-1] selects the last element (a DeepCopy'd system table). Lists
+		// are value types, but their table elements are reference types, so
+		// mutating result[-1] in place is the correct Maple semantics. Evaluate the
+		// inner container first; if it is a list, index it to reach the table.
+		if innerVal, ierr := it.eval(base.nodes[0]); ierr == nil {
+			if _, isList := it.derefTable(innerVal).(List); isList {
+				idxVals, err := it.evalArgs(base.nodes[1:])
+				if err != nil {
+					return nil, err
+				}
+				elem, ok, err := indexCollection(it.derefTable(innerVal), idxVals)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					if t, isT := it.derefTable(elem).(*Table); isT {
+						return t, nil
+					}
+				}
+				return nil, fmt.Errorf("cannot index-assign into non-table list element")
+			}
+		}
 		parent, err := it.resolveAssignTable(base.nodes[0])
 		if err != nil {
 			return nil, err

@@ -55,6 +55,7 @@ func registerBuiltins(it *Interp) {
 	reg("modp", biModp)
 	reg("evalf", biEvalf)
 	reg("table", biTable)
+	reg("array", biArray)
 	reg("subsindets", biSubsindets)
 	reg("piecewise", biPiecewise)
 	reg("ListTools:-Search", biListSearch)
@@ -1528,6 +1529,41 @@ func biTable(it *Interp, args []Value) (Value, error) {
 			}
 		case *Equation:
 			set(x.Lhs, x.Rhs)
+		}
+	}
+	return t, nil
+}
+
+// biArray implements Maple's array(...) data-structure constructor. It is NOT a
+// computer-algebra op: array(a..b) builds a mutable container indexed a..b whose
+// entries are assigned and read by integer index (DT's InitializeResultant does
+// ResultantData['SubResultant']:=array(0..n) then [i]:=...). A *Table models this
+// exactly — arbitrary integer keys, assign/read in place. Dimension ranges are
+// accepted (and ignored: entries materialise on assignment); an optional list
+// initializer fills entries from the range's lower bound upward.
+func biArray(it *Interp, args []Value) (Value, error) {
+	t := newTable()
+	var lo *big.Int // lower bound of the first range, for list-initializer indexing
+	for _, a := range args {
+		switch x := a.(type) {
+		case *Range:
+			if lo == nil {
+				if l, ok := intVal(x.Lo); ok {
+					lo = l
+				}
+			}
+		case List:
+			start := big.NewInt(1)
+			if lo != nil {
+				start = lo
+			}
+			for i, e := range x.Items {
+				idx := new(big.Int).Add(start, big.NewInt(int64(i)))
+				t.set(Integer{idx}, it.resolveRefForStore(e))
+			}
+		case *Equation:
+			// array(0..n, [i=v, ...]) style or direct index=value
+			t.set(x.Lhs, it.resolveRefForStore(x.Rhs))
 		}
 	}
 	return t, nil

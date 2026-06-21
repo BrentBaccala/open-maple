@@ -17,6 +17,10 @@ import (
 	"time"
 )
 
+// sageCallCount counts Sage round-trips when OPENMAPLE_SAGE_TRACE is set — a
+// debugging aid to tell a slow-but-progressing computation from a stuck one.
+var sageCallCount int
+
 // SageBackend implements the CAS interface by talking JSON-lines over
 // stdin/stdout to a long-lived Sage subprocess (cas/sage_server.py).
 //
@@ -164,6 +168,11 @@ func (s *SageBackend) Close() error {
 func (s *SageBackend) roundtrip(req *sageRequest) (*sageResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if os.Getenv("OPENMAPLE_SAGE_TRACE") != "" {
+		sageCallCount++
+		fmt.Fprintf(stderrW(), "[sage %d] %s\n", sageCallCount, req.Op)
+	}
 
 	if err := s.ensureStarted(); err != nil {
 		return nil, err

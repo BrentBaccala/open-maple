@@ -210,6 +210,17 @@ func (it *Interp) checkNamedType(v Value, name string, params []*tree) (bool, er
 		case Integer, Rational, Float, Name, *Sum, *Prod, *Power, *Indexed, *Func:
 			return true, nil
 		}
+		// A DifferentialThomas polynom-object (a table with a 'Polynom' slot) is a
+		// differential polynomial: DT recognises one everywhere via
+		// `type(p,table)` + p['Polynom'], and passes polynom-objects to procs typed
+		// `polynom(anything,function)` (DifferentialSystemReduce's gate, reached
+		// from SplitByInitial -> DifferentialSystemInequationImplied). A system
+		// table has no top-level 'Polynom' slot, so this does not misclassify one.
+		if t, ok := v.(*Table); ok {
+			if _, has := t.get(Name{"Polynom"}); has {
+				return true, nil
+			}
+		}
 		return false, nil
 	case "even":
 		i, ok := v.(Integer)
