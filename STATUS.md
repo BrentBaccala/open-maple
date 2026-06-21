@@ -9,6 +9,23 @@ differential systems, delegating the computer-algebra primitives to a long-lived
 This file is the high-level map: what works, how it's verified, and where the
 remaining frontiers are. Per-task detail lives in `~/project/reports/open-maple-*`.
 
+## Running the example programs
+
+`openmaple <file.mpl>` runs a Maple program directly. All four
+`~/thomas-experiments/ex[123]*` examples run end to end — using the **public**
+API (`with(DifferentialThomas)`, `Ranking`, `ThomasDecomposition`, `Equations`,
+`Inequations`) and **differential notation** input (`diff(u(x),x)`):
+
+- `ex1_singular_ode` — `(u')^2 = 4u` → 2 simple systems
+- `ex1b_discover`    — accessor/typing probes (whattype, op, lastexception[2..])
+- `ex2_params`       — 3 parts incl. the parametric `a=0` vs `a<>0` split
+- `ex3_ode1d`        — 4 jets + 7 params 1D ODE ansatz → 13 simple systems
+
+Reaching this surfaced a string of latent interpreter bugs (see the §"latent
+bugs" list below and the git log): indets dropping function/derivative terms,
+function-head and index-head name resolution, a leaking seq loop variable, and
+lexical-scope-vs-global resolution.
+
 ## What works (end-to-end, pinned by regression tests)
 
 The decomposition engine handles every **standard-ranking** system tried, across
