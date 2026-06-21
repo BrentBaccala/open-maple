@@ -171,11 +171,24 @@ func printProd(p *Prod) string {
 	if len(p.Factors) == 0 {
 		return "1"
 	}
-	parts := make([]string, len(p.Factors))
-	for i, f := range p.Factors {
+	// A leading coefficient of exactly -1 folds into a unary minus (-b, not
+	// -1*b), so a subtracted term u(x,y)+(-1)*diff(...) renders as
+	// u(x,y) - diff(...) — matching Maple. printSum keys on the leading '-'.
+	factors := p.Factors
+	neg := false
+	if len(factors) > 1 && isMinusOne(factors[0]) {
+		neg = true
+		factors = factors[1:]
+	}
+	parts := make([]string, len(factors))
+	for i, f := range factors {
 		parts[i] = printPrec(f, precProd)
 	}
-	return strings.Join(parts, "*")
+	s := strings.Join(parts, "*")
+	if neg {
+		return "-" + s
+	}
+	return s
 }
 
 func printTable(t *Table) string {

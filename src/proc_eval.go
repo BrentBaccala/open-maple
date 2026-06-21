@@ -199,6 +199,12 @@ var listMappableCASOps = map[string]bool{
 // a CAS op, or an inert function application (jet variable / symbol).
 func (it *Interp) dispatchUnknownCall(name string, args []Value) (Value, error) {
 	if isCASOp(name) {
+		// Rebuilding a Value tree from already-reduced Sage output (parseBack):
+		// keep the CAS-op head inert rather than re-dispatching (which would loop
+		// on the inert derivative diff(u(x, y), x) of an unknown function).
+		if it.inertParse {
+			return &Func{Head: Name{name}, Args: args}, nil
+		}
 		// Maple threads these unary ops over a list/set argument.
 		if listMappableCASOps[name] && len(args) == 1 {
 			switch c := args[0].(type) {

@@ -102,10 +102,24 @@ def parse_in_ring(s, R):
 def parse_symbolic(s, varnames):
     """Parse an expression into Sage's symbolic ring SR (for diff over
     transcendental functions like cos(phi[0]))."""
+    import re
+    import sage.all as _sa
+    from sage.all import function
+    from sage.misc.sage_eval import sage_eval
     ns = {}
     for nm in varnames:
         ns[nm] = var(nm)
-    from sage.misc.sage_eval import sage_eval
+    # An applied-function head that is neither a declared variable nor a known
+    # Sage callable (cos/sin/diff/...) is an unknown differential dependent
+    # variable, e.g. u in u(x, y) or diff(u(x, y), x). Declare it as a symbolic
+    # function so Sage keeps diff(u(x, y), x) unevaluated instead of raising
+    # NameError ("name 'u' is not defined"). This is what makes the leader of a
+    # single first-order equation (u[1,0] -> diff(u(x, y), x)) printable.
+    for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\s*\(', s):
+        nm = m.group(1)
+        if nm in ns or hasattr(_sa, nm):
+            continue
+        ns[nm] = function(nm)
     return SR(sage_eval(s, locals=ns))
 
 

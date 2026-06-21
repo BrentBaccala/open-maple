@@ -77,8 +77,10 @@ func TestNonlinearTailLeaderFixes(t *testing.T) {
 	eq("type(u[0,0], `+`)", "false")
 
 	// Fix 4+5: differentiation of a difference of jet variables (was 0 before).
+	// A leading -1 coefficient folds to unary minus (- u[1, 1], not - 1*u[1, 1]) —
+	// the Maple surface form, applied to printValue alongside lprint1D.
 	eq("`DifferentialThomas/PartialDerivativeInternal`(u[0,0]-u[1,0], y, 2, false, R)",
-		"u[0, 1] - 1*u[1, 1]")
+		"u[0, 1] - u[1, 1]")
 
 	// Fix 2: list-element assignment in a table slot (Maple value semantics).
 	mustExec("nt := table(['MultiplicativeVariables' = [infinity, infinity]]):")

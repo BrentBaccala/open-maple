@@ -19,6 +19,18 @@ func (it *Interp) evalSpecialForm(name string, argNodes []*tree) (Value, bool, e
 	case "mul":
 		v, err := it.sfAddMul(argNodes, false)
 		return v, true, err
+	case "product", "sum":
+		// product(f, k=m..n) / sum(f, k=m..n) with concrete integer bounds is the
+		// explicit finite product/sum and expands exactly like mul/add, BINDING the
+		// index k so the body (e.g. DifferentialThomas's `ivar[j]^currentpos[j]`)
+		// can index a list by k. The args must NOT be pre-evaluated (j is unbound
+		// outside the loop). When the binder is missing or its bounds are symbolic
+		// we are NOT handling it here — fall through (handled=false) to the CAS,
+		// which owns the symbolic product/sum case.
+		if v, handled, err := it.sfProductSum(argNodes, name == "sum"); handled || err != nil {
+			return v, handled, err
+		}
+		return nil, false, nil
 	case "assigned":
 		v, err := it.sfAssigned(argNodes)
 		return v, true, err
@@ -105,6 +117,40 @@ func (it *Interp) sfAddMul(argNodes []*tree, isAdd bool) (Value, error) {
 	return it.iterateBinder(binder, body, func(results []Value) (Value, error) {
 		return it.fold(results, isAdd)
 	})
+}
+
+// sfProductSum handles product(f, k=m..n) / sum(f, k=m..n) as an explicit
+// finite product/sum over a concrete integer range, binding k. It returns
+// handled=false (no error) when the call is not this expandable binder form —
+// missing binder, non-`=` binder, or symbolic range bounds — so evalCall can
+// route the symbolic case to the CAS instead. isAdd selects sum vs product.
+func (it *Interp) sfProductSum(argNodes []*tree, isAdd bool) (Value, bool, error) {
+	if len(argNodes) != 2 {
+		return nil, false, nil
+	}
+	body := argNodes[0]
+	binder := argNodes[1]
+	if binder.group != operate || binder.value != "=" {
+		return nil, false, nil
+	}
+	rng, err := it.eval(binder.nodes[1])
+	if err != nil {
+		return nil, true, err
+	}
+	r, ok := rng.(*Range)
+	if !ok {
+		return nil, false, nil
+	}
+	if _, lok := intVal(r.Lo); !lok {
+		return nil, false, nil // symbolic lower bound -> CAS
+	}
+	if _, hok := intVal(r.Hi); !hok {
+		return nil, false, nil // symbolic upper bound -> CAS
+	}
+	v, err := it.iterateBinder(binder, body, func(results []Value) (Value, error) {
+		return it.fold(results, isAdd)
+	})
+	return v, true, err
 }
 
 func (it *Interp) fold(items []Value, isAdd bool) (Value, error) {

@@ -27,6 +27,14 @@ type Interp struct {
 	// %, %%, %%% (history[0]=%, [1]=%%, [2]=%%%). Updated after each statement
 	// in execBlock. DT uses `[op(%%),%]` in DiffVarToList.
 	history [3]Value
+	// inertParse, when set, makes dispatchUnknownCall keep a CAS-op function head
+	// inert (an inert *Func) instead of routing it to the CAS backend. parseBack
+	// sets it on the throwaway interp it uses to rebuild the Value tree from a
+	// Sage output string: that string is already fully reduced, so re-dispatching
+	// a CAS op in it (e.g. diff(u(x, y), x), the inert derivative of an unknown
+	// function) is never needed and would loop forever (parse -> diff op -> Sage
+	// returns the same string -> parse -> ...).
+	inertParse bool
 }
 
 // NewInterp builds an interpreter with builtins registered.

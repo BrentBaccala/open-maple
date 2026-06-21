@@ -836,6 +836,7 @@ func (s *sanitizer) parseBack(str string) (Value, error) {
 		return nil, fmt.Errorf("reparse sage output %q: %w", str, err)
 	}
 	tmp := NewInterp() // fresh interp: unbound names stay symbolic
+	tmp.inertParse = true // already-reduced Sage output: don't re-dispatch CAS ops
 	v, err := tmp.execBlock(root.nodes)
 	if err != nil {
 		return nil, fmt.Errorf("re-eval sage output %q: %w", str, err)
