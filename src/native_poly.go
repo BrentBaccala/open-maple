@@ -53,6 +53,10 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		if len(args) >= 1 {
 			v, ok = nativeContent(args[0])
 		}
+	case "gcd":
+		if len(args) == 2 {
+			v, ok = nativeGCD(args[0], args[1])
+		}
 	case "normal", "simplify":
 		// On a scalar/atom (constant or a single name/jet variable) normal and
 		// simplify are the identity — there is nothing to combine or reduce. A
@@ -535,6 +539,196 @@ func nativeContent(p0 Value) (Value, bool) {
 	}
 	return normRat(new(big.Rat).SetFrac(numGCD, denLCM)), true
 }
+
+// nativeGCD implements gcd(a, b) for the cases that don't need a full
+// multivariate algorithm — the bulk of DT's gcd calls. Matches Sage's QQ[vars]
+// convention learned by sampling:
+//   - both constants → positive rational gcd: gcd(2,4)=2, gcd(1/2,1/3)=1/6
+//   - otherwise → the MONIC gcd (content stripped, leading coeff 1):
+//     gcd(2,-u)=1 (a nonzero constant is a unit), gcd(2x-2,4x-4)=x-1,
+//     gcd(0, 2x-4)=x-2.
+// Univariate (≤1 distinct indeterminate across both args) is the monic Euclidean
+// GCD over Q. Genuinely multivariate inputs (≥2 indeterminates) return ok=false
+// → Sage. A non-polynomial argument also falls back.
+func nativeGCD(a, b Value) (Value, bool) {
+	pa, ok := toPolyNF(a)
+	if !ok {
+		return nil, false
+	}
+	pb, ok := toPolyNF(b)
+	if !ok {
+		return nil, false
+	}
+	// the set of indeterminates actually present across both
+	atoms := map[string]Value{}
+	for _, p := range []*polyNF{pa, pb} {
+		for key, m := range p.coeff {
+			_ = m
+			for ak, e := range p.mono[key] {
+				if e > 0 {
+					atoms[ak] = p.atoms[ak]
+				}
+			}
+		}
+	}
+	switch len(atoms) {
+	case 0:
+		// Both constants. The Sage backend encodes an integer as {"int":...} →
+		// ZZ.gcd (integer gcd: gcd(2,4)=2), but a rational as {"poly":...} →
+		// QQ[x].gcd where a nonzero constant is a UNIT → gcd=1. So only the
+		// both-integer case is an integer gcd; a rational constant falls back to
+		// Sage (which returns 1). (Verify caught native returning 1/6 for
+		// gcd(1/2,1/3) where Sage gives 1.)
+		ca := constCoeff(pa)
+		cb := constCoeff(pb)
+		if ca.IsInt() && cb.IsInt() {
+			g := new(big.Int).GCD(nil, nil,
+				new(big.Int).Abs(ca.Num()), new(big.Int).Abs(cb.Num()))
+			return bigInt(g), true
+		}
+		return nil, false
+	case 1:
+		var uvar string
+		var uval Value
+		for k, vv := range atoms {
+			uvar, uval = k, vv
+		}
+		ua := univariateCoeffs(pa, uvar)
+		ub := univariateCoeffs(pb, uvar)
+		g := univGCD(ua, ub)
+		return uniToValue(g, uval), true
+	default:
+		return nil, false // multivariate → Sage
+	}
+}
+
+// constCoeff returns the constant coefficient of a polyNF with no indeterminates
+// (the empty-monomial coefficient), or 0.
+func constCoeff(p *polyNF) *big.Rat {
+	if c, ok := p.coeff[monoKey(nfMono{})]; ok {
+		return new(big.Rat).Set(c)
+	}
+	return new(big.Rat)
+}
+
+// univariateCoeffs extracts a degree→coefficient map from a polyNF whose only
+// indeterminate is uvar (constants land at degree 0).
+func univariateCoeffs(p *polyNF, uvar string) map[int64]*big.Rat {
+	out := map[int64]*big.Rat{}
+	for key, c := range p.coeff {
+		var deg int64
+		if e, ok := p.mono[key][uvar]; ok {
+			deg = e
+		}
+		out[deg] = new(big.Rat).Set(c)
+	}
+	return out
+}
+
+// univGCD returns the monic gcd of two univariate polynomials over Q (degree→
+// coeff maps), via the Euclidean algorithm. gcd(0,0)=0; a nonzero constant
+// normalizes to 1.
+func univGCD(a, b map[int64]*big.Rat) map[int64]*big.Rat {
+	for !uniIsZero(b) {
+		a, b = b, uniMod(a, b)
+	}
+	return uniMonic(a)
+}
+
+func uniIsZero(p map[int64]*big.Rat) bool {
+	for _, c := range p {
+		if c.Sign() != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func uniDeg(p map[int64]*big.Rat) (int64, bool) {
+	deg := int64(-1)
+	found := false
+	for d, c := range p {
+		if c.Sign() != 0 && (!found || d > deg) {
+			deg, found = d, true
+		}
+	}
+	return deg, found
+}
+
+// uniMod returns a mod b (remainder of univariate polynomial division over Q).
+func uniMod(a, b map[int64]*big.Rat) map[int64]*big.Rat {
+	r := map[int64]*big.Rat{}
+	for d, c := range a {
+		if c.Sign() != 0 {
+			r[d] = new(big.Rat).Set(c)
+		}
+	}
+	bd, ok := uniDeg(b)
+	if !ok {
+		return r // division by zero poly: leave a unchanged
+	}
+	blc := b[bd]
+	for {
+		rd, ok := uniDeg(r)
+		if !ok || rd < bd {
+			return r
+		}
+		factor := new(big.Rat).Quo(r[rd], blc) // r_lc / b_lc
+		shift := rd - bd
+		for d, c := range b {
+			if c.Sign() == 0 {
+				continue
+			}
+			term := new(big.Rat).Mul(factor, c)
+			nd := d + shift
+			if cur, ok := r[nd]; ok {
+				cur.Sub(cur, term)
+			} else {
+				r[nd] = new(big.Rat).Neg(term)
+			}
+		}
+		delete(r, rd) // leading term cancels exactly
+	}
+}
+
+// uniMonic divides a univariate polynomial by its leading coefficient (→ leading
+// coeff 1); the zero polynomial stays zero.
+func uniMonic(p map[int64]*big.Rat) map[int64]*big.Rat {
+	d, ok := uniDeg(p)
+	if !ok {
+		return map[int64]*big.Rat{0: new(big.Rat)} // zero
+	}
+	lc := p[d]
+	out := map[int64]*big.Rat{}
+	for k, c := range p {
+		if c.Sign() != 0 {
+			out[k] = new(big.Rat).Quo(c, lc)
+		}
+	}
+	return out
+}
+
+// uniToValue rebuilds a Value from a univariate degree→coeff map over the
+// indeterminate uval, reusing fromPolyNF's descending-degree reconstruction.
+func uniToValue(p map[int64]*big.Rat, uval Value) Value {
+	nf := newPolyNF()
+	key := canonicalKey(uval)
+	nf.atoms[key] = uval
+	for d, c := range p {
+		if c.Sign() == 0 {
+			continue
+		}
+		var m nfMono
+		if d == 0 {
+			m = nfMono{}
+		} else {
+			m = nfMono{key: d}
+		}
+		nf.add(m, c)
+	}
+	return fromPolyNF(nf)
+}
+
 
 // fromPolyNF reconstructs a Value AST (Sum/Prod/Power/atoms/number) from a
 // normal form, in the deterministic comparePolyNF key order. Equality is
