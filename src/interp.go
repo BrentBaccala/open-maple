@@ -35,6 +35,10 @@ type Interp struct {
 	// function) is never needed and would loop forever (parse -> diff op -> Sage
 	// returns the same string -> parse -> ...).
 	inertParse bool
+	// verifyNative, when set via OPENMAPLE_VERIFY_NATIVE, makes the native
+	// polynomial fast paths (native_poly.go) also call Sage and assert the two
+	// results agree — a correctness harness for the native ops, off by default.
+	verifyNative bool
 }
 
 // NewInterp builds an interpreter with builtins registered.
@@ -48,6 +52,7 @@ func NewInterp() *Interp {
 		cas:       selectCAS(),
 	}
 	registerBuiltins(it)
+	it.verifyNative = os.Getenv("OPENMAPLE_VERIFY_NATIVE") != ""
 	return it
 }
 

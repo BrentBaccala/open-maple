@@ -205,6 +205,13 @@ func (it *Interp) dispatchUnknownCall(name string, args []Value) (Value, error) 
 		if it.inertParse {
 			return &Func{Head: Name{name}, Args: args}, nil
 		}
+		// Native fast paths for the cheap structure ops DT calls in tight loops
+		// (degree, indets). They handle only the clean polynomial case and return
+		// ok=false otherwise, so Sage remains the source of truth for everything
+		// else. See native_poly.go.
+		if v, ok := it.tryNativePoly(name, args); ok {
+			return v, nil
+		}
 		// Maple threads these unary ops over a list/set argument.
 		if listMappableCASOps[name] && len(args) == 1 {
 			switch c := args[0].(type) {
