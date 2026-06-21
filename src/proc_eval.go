@@ -570,6 +570,14 @@ func (it *Interp) evalIndex(n *tree) (Value, error) {
 			if v, ok, err := indexCollection(cur, idxVals); ok || err != nil {
 				return v, err
 			}
+			// A name bound to another name, used as an index head, resolves to that
+			// name as the indexed head: (a -> a[0])(c1) = c1[0]. DT's SubstituteDVar
+			// relies on this — subs(map(a->a=a[0$nops(ivar)], dvar), p) builds
+			// d = d[0] for each dvar d, so the body a[0] must index the *argument*,
+			// not the literal lambda parameter (which otherwise leaked as `a[0]`).
+			if nm, ok := cur.(Name); ok {
+				bn = nm.Val
+			}
 		}
 		// unbound name -> inert indexed (jet variable u[1,0])
 		return &Indexed{Head: Name{bn}, Idx: idxVals}, nil
