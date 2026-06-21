@@ -278,6 +278,21 @@ func typeOrder(v Value) int {
 // compareValues defines a total order used for set canonicalisation and as the
 // default term comparator for sort(). Returns -1, 0, +1.
 func compareValues(a, b Value) int {
+	// Polynomial-aware comparison: when at least one side is a compound
+	// polynomial (Sum/Prod/Power) and BOTH sides are plain polynomial
+	// expressions, compare by expanded normal form. This makes polynomial
+	// equality order- and shape-independent — x+y == y+x, and a Sum that cancels
+	// to an atom (u[0,0]+u[1,1]-u[1,1]) == u[0,0] — regardless of which path
+	// (Sage in one order, native code in another) produced each value. Without
+	// this, equality/membership compare the printed string, so two equal
+	// polynomials in different term order would test unequal — which is what made
+	// a native expand()/coeff() unsafe. (Mixed/non-polynomial operands fall
+	// through to the structural comparison below.)
+	if isCompoundPoly(a) || isCompoundPoly(b) {
+		if c, ok := comparePolyValues(a, b); ok {
+			return c
+		}
+	}
 	ta, tb := typeOrder(a), typeOrder(b)
 	if ta != tb {
 		return cmpInt(ta, tb)

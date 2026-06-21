@@ -329,6 +329,61 @@ func (p *polyNF) maxDegree(vars []string) int64 {
 	return max
 }
 
+// isCompoundPoly reports whether v is a structural polynomial expression
+// (Sum/Prod/Power) — the kinds whose printed form, not value, currently drives
+// comparison. Used by compareValues to decide when to try normal-form compare.
+func isCompoundPoly(v Value) bool {
+	switch v.(type) {
+	case *Sum, *Prod, *Power:
+		return true
+	}
+	return false
+}
+
+// comparePolyValues compares two values by expanded polynomial normal form,
+// giving a total order in which equal polynomials compare equal regardless of
+// term order or structural shape. ok=false if either value is not a plain
+// polynomial (then the caller uses the structural/string comparison).
+func comparePolyValues(a, b Value) (int, bool) {
+	pa, oka := toPolyNF(a)
+	if !oka {
+		return 0, false
+	}
+	pb, okb := toPolyNF(b)
+	if !okb {
+		return 0, false
+	}
+	return comparePolyNF(pa, pb), true
+}
+
+// comparePolyNF is a deterministic total order on normal forms: compare the
+// monomials in sorted-key order, breaking ties by coefficient, then by count.
+// Equal polynomials have identical {monoKey: coeff} maps, hence compare 0. The
+// particular order is arbitrary but stable (it is NOT Maple's print order; the
+// printed surface is unaffected — this only governs set/sort/equality).
+func comparePolyNF(p, q *polyNF) int {
+	pk := sortedKeys(p.coeff)
+	qk := sortedKeys(q.coeff)
+	for i := 0; i < len(pk) && i < len(qk); i++ {
+		if c := strings.Compare(pk[i], qk[i]); c != 0 {
+			return c
+		}
+		if c := p.coeff[pk[i]].Cmp(q.coeff[qk[i]]); c != 0 {
+			return c
+		}
+	}
+	return cmpInt(len(pk), len(qk))
+}
+
+func sortedKeys(m map[string]*big.Rat) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // polyAtom reports whether v is an indeterminate atom (a name or a jet/indexed
 // variable). Numbers are not atoms; Func/Float etc. are not handled natively.
 func polyAtom(v Value) (Value, bool) {
