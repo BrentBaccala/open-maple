@@ -452,12 +452,75 @@ def _content(p):
     return QQ(g) / QQ(d)
 
 
+def _vnames_arg(a):
+    """Extract the variable-name list from a content/primpart second argument
+    ({"name": x} or {"exprlist": [...]} or {"poly": "x"})."""
+    if "exprlist" in a:
+        return list(a["exprlist"])
+    if "name" in a:
+        return [a["name"]]
+    if "poly" in a:
+        return [a["poly"]]
+    return []
+
+
 def op_primpart(req):
     R = make_ring(req["vars"])
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    return enc_poly(p / _content(p))
+    # primpart(p, V) = p / content(p, V). Like content, the two-arg form must
+    # divide out the *polynomial* content w.r.t. V, not just the rational content.
+    if len(req["args"]) < 2:
+        c = _content(p)
+    else:
+        c = _content_wrt(p, _vnames_arg(req["args"][1]))
+    if c == 0:
+        return enc_poly(p)
+    return enc_poly(p / c)
+
+
+def _content_wrt(p, Vnames):
+    """Maple content(p, V): p viewed as a polynomial in the variables V, return
+    the gcd of its coefficients (which are polynomials in the remaining vars).
+
+    Maple's one-arg content(p) is the rational content (gcd of numeric coeffs);
+    the two-arg form factors out a *polynomial* common to the V-coefficients,
+    e.g. content(x*Vf + x*rho, [Vf, rho]) = x. DT divides every polynomial by
+    this in SimplifyPolynom, so getting it wrong (returning the rational content
+    and leaving the x factor in) corrupts the reduction.
+
+    Returned up to a rational unit times the rational content — exactly what DT
+    needs (it divides p by the content, then re-normalizes via StandardFormSimplify).
+    """
+    R = p.parent()
+    rc = _content(p)            # rational content (gcd nums / lcm dens)
+    if rc == 0:
+        return R(0)
+    b = p / rc                  # integer-primitive
+    gens = {str(g): i for i, g in enumerate(R.gens())}
+    V_idx = [gens[v] for v in Vnames if v in gens]
+    if not V_idx:
+        return rc
+    V_set = set(V_idx)
+    ngens = R.ngens()
+    # group b's terms by their V-exponents; each group's value is the
+    # coefficient polynomial in the remaining variables. A univariate ring's
+    # .dict() has bare int exponent keys, not tuples — normalize both.
+    groups = {}
+    for mon, c in b.dict().items():
+        exps = [int(mon)] if isinstance(mon, int) else list(mon)
+        rest_exp = [0 if i in V_set else exps[i] for i in range(ngens)]
+        term = c * R.monomial(*rest_exp)
+        vkey = tuple(exps[i] for i in V_idx)
+        groups[vkey] = groups.get(vkey, R(0)) + term
+    g = R(0)
+    for poly in groups.values():
+        g = poly if g == 0 else g.gcd(poly)
+    gc = _content(g)            # strip g's own rational content -> primitive
+    if gc != 0:
+        g = g / gc
+    return rc * g
 
 
 def op_content(req):
@@ -465,7 +528,9 @@ def op_content(req):
     p = decode_arg(req["args"][0], R)
     if p == 0:
         return enc_int(0)
-    return enc_poly(_content(p))
+    if len(req["args"]) < 2:
+        return enc_poly(_content(p))   # one-arg: rational content
+    return enc_poly(_content_wrt(p, _vnames_arg(req["args"][1])))
 
 
 def op_sqrfree(req):

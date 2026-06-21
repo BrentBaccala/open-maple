@@ -1,7 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"math/big"
+	"os"
+	"strings"
 )
 
 // evalSpecialForm handles builtins that must inspect or delay their argument
@@ -64,8 +67,32 @@ func (it *Interp) evalSpecialForm(name string, argNodes []*tree) (Value, bool, e
 		return NULL(), true, nil
 	case "userinfo":
 		// userinfo(level, pkg, msg...) — diagnostic output only emitted when
-		// infolevel is high enough. Default: evaluate nothing (the msg args
-		// include expensive/fragile Print* calls). NOP.
+		// infolevel is high enough. The msg args include expensive/fragile Print*
+		// calls, so at the default (silent) level evaluate NOTHING. When
+		// OPENMAPLE_INFOLEVEL is set and level <= it, lazily evaluate and print the
+		// message args (this is the window into DT's case-split decisions).
+		if it.infoLevel == 0 || len(argNodes) < 1 {
+			return NULL(), true, nil
+		}
+		lvlV, err := it.eval(argNodes[0])
+		if err != nil {
+			return nil, true, err
+		}
+		lvl, ok := intVal(lvlV)
+		if !ok || int(lvl.Int64()) > it.infoLevel {
+			return NULL(), true, nil
+		}
+		parts := make([]string, 0, len(argNodes))
+		for _, an := range argNodes[2:] {
+			v, err := it.eval(an)
+			if err != nil {
+				// a diagnostic that fails to evaluate shouldn't abort the run
+				parts = append(parts, "<info-eval-err:"+err.Error()+">")
+				continue
+			}
+			parts = append(parts, plainText(v))
+		}
+		fmt.Fprintf(os.Stderr, "[info%d] %s\n", lvl.Int64(), strings.Join(parts, " "))
 		return NULL(), true, nil
 	case "timelimit":
 		// timelimit(t, expr) — evaluate expr, returning its value. We do not

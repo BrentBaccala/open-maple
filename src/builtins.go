@@ -1194,7 +1194,21 @@ func biERROR(it *Interp, args []Value) (Value, error) {
 }
 
 func biUserinfo(it *Interp, args []Value) (Value, error) {
-	return NULL(), nil // userinfo prints diagnostics; NOP at infolevel 0
+	// userinfo(level, package, msg...) — print when level <= infoLevel. The first
+	// arg is the level, the second the package name, the rest the message.
+	if it.infoLevel == 0 || len(args) < 1 {
+		return NULL(), nil
+	}
+	lvl, ok := intVal(args[0])
+	if !ok || int(lvl.Int64()) > it.infoLevel {
+		return NULL(), nil
+	}
+	parts := make([]string, 0, len(args))
+	for _, a := range args[2:] {
+		parts = append(parts, plainText(a))
+	}
+	fmt.Fprintf(os.Stderr, "[info%d] %s\n", lvl.Int64(), strings.Join(parts, " "))
+	return NULL(), nil
 }
 
 func biASSERT(it *Interp, args []Value) (Value, error) {
@@ -1214,6 +1228,9 @@ func biASSERT(it *Interp, args []Value) (Value, error) {
 }
 
 func biWarning(it *Interp, args []Value) (Value, error) {
+	if it.infoLevel > 0 && len(args) >= 1 {
+		fmt.Fprintf(os.Stderr, "[warning] %s\n", plainText(args[0]))
+	}
 	return NULL(), nil
 }
 

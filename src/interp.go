@@ -39,6 +39,16 @@ type Interp struct {
 	// polynomial fast paths (native_poly.go) also call Sage and assert the two
 	// results agree — a correctness harness for the native ops, off by default.
 	verifyNative bool
+	// disableNative, set via OPENMAPLE_DISABLE_NATIVE, forces every CA op through
+	// the Sage backend (the native fast paths are skipped). A bisection switch for
+	// telling a native-layer bug from an interpreter bug.
+	disableNative bool
+	// infoLevel mirrors Maple's infolevel[...]: userinfo(n, ...) calls with
+	// n <= infoLevel print their message to stderr. Set via OPENMAPLE_INFOLEVEL.
+	// DT logs its decomposition decisions here — split-by-initial/square, insert,
+	// found-inconsistent, found-finished, system counts — so this is the window
+	// into where the case-split tree is (or isn't) being built. 0 = silent.
+	infoLevel int
 }
 
 // NewInterp builds an interpreter with builtins registered.
@@ -53,6 +63,12 @@ func NewInterp() *Interp {
 	}
 	registerBuiltins(it)
 	it.verifyNative = os.Getenv("OPENMAPLE_VERIFY_NATIVE") != ""
+	it.disableNative = os.Getenv("OPENMAPLE_DISABLE_NATIVE") != ""
+	if s := os.Getenv("OPENMAPLE_INFOLEVEL"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			it.infoLevel = n
+		}
+	}
 	return it
 }
 

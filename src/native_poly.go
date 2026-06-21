@@ -63,7 +63,11 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 	case "denom":
 		v, ok = nativeNumerDenom(args, false)
 	case "content":
-		if len(args) >= 1 {
+		// Only the one-arg form content(p) is the rational content (gcd of numeric
+		// coefficients) that nativeContent computes. The two-arg content(p, V) is
+		// the polynomial content w.r.t. the variables V (e.g. content(x*Vf+x*rho,
+		// [Vf,rho])=x) — a different computation; route it to Sage's op_content.
+		if len(args) == 1 {
 			v, ok = nativeContent(args[0])
 		}
 	case "gcd":

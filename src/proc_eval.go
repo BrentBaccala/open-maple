@@ -220,9 +220,13 @@ func (it *Interp) dispatchUnknownCall(name string, args []Value) (Value, error) 
 		// Native fast paths for the cheap structure ops DT calls in tight loops
 		// (degree, indets). They handle only the clean polynomial case and return
 		// ok=false otherwise, so Sage remains the source of truth for everything
-		// else. See native_poly.go.
-		if v, ok := it.tryNativePoly(name, args); ok {
-			return v, nil
+		// else. See native_poly.go. OPENMAPLE_DISABLE_NATIVE forces every op to the
+		// CAS — a bisection switch: if a result (e.g. the decomposition's component
+		// count) changes when the native layer is off, the native layer is implicated.
+		if !it.disableNative {
+			if v, ok := it.tryNativePoly(name, args); ok {
+				return v, nil
+			}
 		}
 		// Maple threads these unary ops over a list/set argument.
 		if listMappableCASOps[name] && len(args) == 1 {
