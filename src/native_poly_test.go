@@ -52,3 +52,45 @@ func TestNativeIndets(t *testing.T) {
 		}
 	}
 }
+
+// TestNativeExpand pins native expand(): fully distributed, collected, printed
+// in descending total degree (matching Sage's str()). Cancellation drops terms.
+func TestNativeExpand(t *testing.T) {
+	it := NewInterp()
+	cases := []struct{ expr, want string }{
+		{"expand((u[1,0]+1)^2);", "u[1, 0]^2 + 2*u[1, 0] + 1"},
+		// same total degree -> tiebroken by native canonical key (NOT Sage's
+		// degrevlex var order); semantically equal, surface order may differ.
+		{"expand((u[1,0]+u[0,1])*(u[1,0]-u[0,1]));", "-u[0, 1]^2 + u[1, 0]^2"},
+		{"expand(u[0,0]*(u[1,0]+2));", "u[0, 0]*u[1, 0] + 2*u[0, 0]"},
+		{"expand(u[1,0] - u[1,0]);", "0"},
+		{"expand(3);", "3"},
+	}
+	for _, c := range cases {
+		v, err := it.Exec(c.expr)
+		if err != nil { t.Fatalf("%s err: %v", c.expr, err) }
+		if got := printValue(v); got != c.want {
+			t.Fatalf("%s: got %q, want %q", c.expr, got, c.want)
+		}
+	}
+}
+
+// TestNativeCoeff pins native coeff(p, x, n): the coefficient of x^n, a
+// polynomial in the remaining variables.
+func TestNativeCoeff(t *testing.T) {
+	it := NewInterp()
+	cases := []struct{ expr, want string }{
+		{"coeff(u[1,0]^2 + 3*u[1,0] + 5, u[1,0], 1);", "3"},
+		{"coeff(u[1,0]^2 + 3*u[1,0] + 5, u[1,0], 2);", "1"},
+		{"coeff(u[1,0]^2 + 3*u[1,0] + 5, u[1,0], 0);", "5"},
+		{"coeff(u[0,0]*u[1,0] + u[1,0], u[1,0]);", "u[0, 0] + 1"},
+		{"coeff(u[0,0]*u[1,0] + u[1,0], u[1,0], 1);", "u[0, 0] + 1"},
+	}
+	for _, c := range cases {
+		v, err := it.Exec(c.expr)
+		if err != nil { t.Fatalf("%s err: %v", c.expr, err) }
+		if got := printValue(v); got != c.want {
+			t.Fatalf("%s: got %q, want %q", c.expr, got, c.want)
+		}
+	}
+}

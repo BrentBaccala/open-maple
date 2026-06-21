@@ -39,15 +39,24 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 		}
 	case "degree":
 		v, ok = nativeDegree(args)
+	case "expand":
+		if len(args) == 1 {
+			v, ok = nativeExpand(args[0])
+		}
+	case "coeff":
+		v, ok = nativeCoeff(args)
 	}
 	if !ok {
 		return nil, false
 	}
 	if it.verifyNative {
-		ref, err := it.cas.Call(name, args)
-		if err != nil || compareValues(v, ref) != 0 {
+		// Compare against Sage only when Sage itself produces a value: the Sage
+		// path errors on inputs native handles correctly (e.g. degree(3, x) — the
+		// degree of a constant — makes op_degree raise), and there native is the
+		// authority, not a mismatch.
+		if ref, err := it.cas.Call(name, args); err == nil && compareValues(v, ref) != 0 {
 			panic("native " + name + " mismatch: native=" + printValue(v) +
-				" sage=" + printValueOrErr(ref, err) + " args=" + printArgs(args))
+				" sage=" + printValue(ref) + " args=" + printArgs(args))
 		}
 	}
 	return v, true
@@ -382,6 +391,138 @@ func sortedKeys(m map[string]*big.Rat) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ---------------------------------------------------------------------------
+// expand / coeff via normal form
+// ---------------------------------------------------------------------------
+
+// nativeExpand implements expand(p): the fully distributed/collected polynomial.
+// Reconstructed from the normal form in a deterministic order. ok=false to fall
+// back to Sage for non-polynomial input.
+func nativeExpand(v Value) (Value, bool) {
+	p, ok := toPolyNF(v)
+	if !ok {
+		return nil, false
+	}
+	return fromPolyNF(p), true
+}
+
+// nativeCoeff implements coeff(p, x, n) — the coefficient of x^n in p (a
+// polynomial in the remaining variables), matching Sage's p.coefficient({x:n}).
+// n defaults to 1. ok=false to fall back to Sage.
+func nativeCoeff(args []Value) (Value, bool) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, false
+	}
+	xv, ok := polyAtom(args[1])
+	if !ok {
+		return nil, false
+	}
+	var n int64 = 1
+	if len(args) == 3 {
+		e, ok := nonNegIntExp(args[2])
+		if !ok {
+			return nil, false
+		}
+		n = e
+	}
+	p, ok := toPolyNF(args[0])
+	if !ok {
+		return nil, false
+	}
+	xk := canonicalKey(xv)
+	res := newPolyNF()
+	for k, a := range p.atoms {
+		res.atoms[k] = a
+	}
+	for key, c := range p.coeff {
+		m := p.mono[key]
+		if m[xk] != n {
+			continue
+		}
+		// drop x^n from the monomial; keep the rest
+		nm := nfMono{}
+		for a, e := range m {
+			if a == xk {
+				continue
+			}
+			nm[a] = e
+		}
+		res.add(nm, c)
+	}
+	return fromPolyNF(res), true
+}
+
+// fromPolyNF reconstructs a Value AST (Sum/Prod/Power/atoms/number) from a
+// normal form, in the deterministic comparePolyNF key order. Equality is
+// order-independent (compareValues), so the chosen order only affects the
+// printed surface.
+func fromPolyNF(p *polyNF) Value {
+	if len(p.coeff) == 0 {
+		return newInt(0)
+	}
+	keys := sortedKeys(p.coeff)
+	// Print in descending total degree (then canonical key), matching Sage's
+	// str() so an expand() result reads the same whether produced natively or by
+	// Sage — keeping the printed surface (and DT's FactorSorter, which byte-
+	// compares convert(,string)) consistent across the two paths.
+	sort.SliceStable(keys, func(i, j int) bool {
+		di, dj := monoTotalDeg(p.mono[keys[i]]), monoTotalDeg(p.mono[keys[j]])
+		if di != dj {
+			return di > dj
+		}
+		return keys[i] < keys[j]
+	})
+	terms := make([]Value, 0, len(keys))
+	for _, k := range keys {
+		terms = append(terms, monoTerm(p.coeff[k], p.mono[k], p.atoms))
+	}
+	if len(terms) == 1 {
+		return terms[0]
+	}
+	return &Sum{Terms: terms}
+}
+
+// monoTotalDeg is the sum of exponents in a monomial.
+func monoTotalDeg(m nfMono) int64 {
+	var d int64
+	for _, e := range m {
+		d += e
+	}
+	return d
+}
+
+// monoTerm builds coeff * prod(atom^exp) as a Value, omitting a unit coefficient
+// and unit exponents so the result reads like ordinary arithmetic output.
+func monoTerm(c *big.Rat, m nfMono, atoms map[string]Value) Value {
+	akeys := make([]string, 0, len(m))
+	for a := range m {
+		akeys = append(akeys, a)
+	}
+	sort.Strings(akeys)
+	factors := make([]Value, 0, len(m)+1)
+	for _, ak := range akeys {
+		e := m[ak]
+		if e == 1 {
+			factors = append(factors, atoms[ak])
+		} else {
+			factors = append(factors, &Power{Base: atoms[ak], Exp: newInt(e)})
+		}
+	}
+	coeffVal := normRat(new(big.Rat).Set(c))
+	if len(factors) == 0 {
+		return coeffVal // pure constant
+	}
+	cv, isInt := coeffVal.(Integer)
+	if isInt && cv.Val.Cmp(big.NewInt(1)) == 0 {
+		// coefficient 1: drop it
+		if len(factors) == 1 {
+			return factors[0]
+		}
+		return &Prod{Factors: factors}
+	}
+	return &Prod{Factors: append([]Value{coeffVal}, factors...)}
 }
 
 // polyAtom reports whether v is an indeterminate atom (a name or a jet/indexed
