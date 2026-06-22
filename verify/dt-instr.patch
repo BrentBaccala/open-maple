@@ -1,16 +1,16 @@
 diff -ru a/main b/main
---- a/main	2026-06-21 18:19:50.263465843 -0400
-+++ b/main	2026-06-21 18:19:50.291465850 -0400
+--- a/main
++++ b/main
 @@ -461,6 +461,7 @@
      if `@@PACKAGE@@/Equation`(q) then
-       if `@@PACKAGE@@/StandardForm`(q)<>0 then 
+       if `@@PACKAGE@@/StandardForm`(q)<>0 then
          if `@@PACKAGE@@/IsDifferentialFieldElement`(q) then
 +          printf("OMRI_RECORD|field_element|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
            DifferentialSystem['Inconsistent']:=true;
            return `@@PACKAGE@@/ReturnInDoNextStepAndSetOrders`(DifferentialSystem,result);
          elif not `@@PACKAGE@@/NonZeroInitial`(q) then
 @@ -486,6 +487,7 @@
- 
+
      else#q is an inequation
        if `@@PACKAGE@@/StandardForm`(q)=0 then
 +        printf("OMRI_RECORD|inequation_zero|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
@@ -26,8 +26,8 @@ diff -ru a/main b/main
            else
              `@@PACKAGE@@/InsertIntoJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),p);
 diff -ru a/reduction b/reduction
---- a/reduction	2026-06-21 18:19:50.317465856 -0400
-+++ b/reduction	2026-06-21 18:19:50.340465862 -0400
+--- a/reduction
++++ b/reduction
 @@ -569,6 +569,7 @@
    while savedstdform<>`@@PACKAGE@@/StandardForm`(q) do
      if `@@PACKAGE@@/IsDifferentialFieldElement`(q) then
@@ -38,15 +38,15 @@ diff -ru a/reduction b/reduction
        return result;
 @@ -620,6 +621,7 @@
      q:=eval(`@@PACKAGE@@/ReduceNonLinearTailWRTJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),q,DifferentialSystem['Ranking']['MaxSizeMultiplicator']));
-     
+
      if `@@PACKAGE@@/Leader`(q)<>oldleader or oldrank<>`@@PACKAGE@@/Rank`(q) then
 +      printf("OMRI_RECORD|rank_leader_change|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
        DifferentialSystem['Inconsistent']:=true;
        userinfo(3,@@PACKAGE@@,`found inconsistent system from tailreduction`);
        return NULL;#return result not needed here, since the other systems have to come from factorization and these are also inconsistent
 diff -ru a/strategy b/strategy
---- a/strategy	2026-06-21 18:19:50.362465868 -0400
-+++ b/strategy	2026-06-21 18:19:50.381465873 -0400
+--- a/strategy
++++ b/strategy
 @@ -26,6 +26,7 @@
    while leader=1 and nops(DifferentialSystem['Q'])>0 do
      if `@@PACKAGE@@/IsDifferentialFieldElement`(DifferentialSystem['Q'][1]) then
@@ -55,3 +55,47 @@ diff -ru a/strategy b/strategy
          DifferentialSystem['Inconsistent']:=true;
          DifferentialSystem['Q']:=[];
          return NULL;
+diff -ru a/algebraic b/algebraic
+--- a/algebraic
++++ b/algebraic
+@@ -92,5 +92,6 @@
+     # If we didn't find any non-zero discriminants, this branch is inconsistent
+     if i>`@@PACKAGE@@/Rank`(p)-1 then
++      printf("OMRI_RECORD|discriminant_exhaustion|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(p), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+       DifferentialSystem['Inconsistent']:=true;
+       return NULL;
+     fi:
+@@ -197,5 +198,6 @@
+   fi:
+   #if two inequation are equal, then the system is inconsistent
+   if nops({op(map(`@@PACKAGE@@/StandardForm`,DifferentialSystem['Inequations']))})<>nops(DifferentialSystem['Inequations']) then
++    printf("OMRI_RECORD|dup_inequation|NONE|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+     DifferentialSystem['Inconsistent']:=true
+   fi;
+diff -ru a/factor b/factor
+--- a/factor
++++ b/factor
+@@ -56,6 +56,7 @@
+     r:=RootOf(subs(functionsubs,subs(result1,`@@PACKAGE@@/StandardForm`(l[i]))),x);
+     if not type(r,RootOf) then
+       userinfo(5,@@PACKAGE@@,`detected inconsistent system from non-squarefree factoring`);
++      printf("OMRI_RECORD|factor_nonsquarefree|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(l[i]), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+       DifferentialSystem['Inconsistent']:=true;
+       if `@@PACKAGE@@/Inequation`(q) then
+         q:=`@@PACKAGE@@/CreatePolynomialObject`(0,q['Ranking']);
+@@ -121,5 +122,6 @@
+           return DifferentialSystem;
+         catch "leading coefficient should be invertible":
++          printf("OMRI_RECORD|leadcoeff_noninvertible|%a|EQS|%a|INEQS|%a\n", `@@PACKAGE@@/StandardForm`(q), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+           DifferentialSystem['Inconsistent']:=true;
+           if `@@PACKAGE@@/Inequation`(q) then
+             q:=`@@PACKAGE@@/CreatePolynomialObject`(0,q['Ranking']);
+diff -ru a/differentialsystems b/differentialsystems
+--- a/differentialsystems
++++ b/differentialsystems
+@@ -463,4 +463,5 @@
+   if select(a->`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0,l)<>[] or
+       select(a->`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a),l)<>[] then
++      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(`@@PACKAGE@@/StandardForm`,select(a->(`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0) or (`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a)),l)), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
+       DifferentialSystem['Inconsistent']:=true
+   fi;
