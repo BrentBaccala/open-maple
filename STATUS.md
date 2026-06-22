@@ -69,6 +69,23 @@ hot ops and to tell an interpreter-bound computation from a CAS-bound one.
 
 `OPENMAPLE_TRACE_PROCS=1` prints the Maple-level proc call chain on error.
 
+## Independent decomposition verification (`verify/`)
+
+A second, engine-independent harness (`verify/`, uses only Sage Gröbner/ideal/
+saturation, never DT's reducer) certifies a *computed decomposition* is sound,
+disjoint, square-free, passive, and **complete**. For the hydrogen 29-cell result
+the full verdict is now **A** triangular 29/29, **B** soundness 29/29, **C**
+disjoint 406/406, **E** passive 29/29, square-free 29/29, **F** all 412 pruned
+branches certified empty, and **D′ cover** PASS — the 29 cells + 412 empty
+branches provably tile the whole parameter space (`⋃V(cells)=V(input)`), via
+split-exhaustiveness: every branch comes from one of seven known DT split
+operators (six tautological `p=0 ⊔ p≠0`, the `Factorize` equation split
+variety-checked `V(q)=V(fak1·fak2)`). So the 29-cell decomposition is the
+canonical Thomas decomposition for the ranking; Maple's ~70–80 is a DT
+version/granularity difference, not missing solutions. See
+`~/project/reports/open-maple-decomposition-verification.md` (Addenda 2–3) and
+`verify/README.md`.
+
 ## Latent bugs found and fixed (all were silent corruption, not crashes)
 
 Running real DT systems + the verify harness surfaced a string of pre-existing

@@ -16,7 +16,8 @@ only *upstream*, to produce the decomposition data (`hydrogen_thomas_result.m`).
 | **A** | Each cell is a valid **triangular set** — distinct leaders under the ranking, no identically-zero initial/separant | cheap (structural) |
 | **B** | **Soundness**: each input equation reduces to 0 modulo each cell's equations + prolongations (so `Sol(cell) ⊆ Sol(input)`); each input inequation is a unit on the cell; each cell is **non-vacuous** (consistent) | heavy (Gröbner per cell) |
 | **C** | **Disjointness**: every pair of cells shares no solution (`1 ∈` saturated combined ideal) | moderate (one saturation per pair) |
-| **D** | **Cover / completeness** (bounded prolongation): `V(input_N) ⊆ ⋃ V(cell_i)` — settles whether a branch was dropped. Tractable only for small systems; reports INTRACTABLE and defers to E on large ones | exponential in falsification combinations |
+| **D** | **Cover / completeness** (bounded prolongation): `V(input_N) ⊆ ⋃ V(cell_i)` — settles whether a branch was dropped. Tractable only for small systems; reports INTRACTABLE and defers to **D′** (split-exhaustiveness, below) on large ones | exponential in falsification combinations |
+| **D′** | **Cover via split-exhaustiveness** (`check_cover.py`): the tractable route to D. Confirms (via an `OMRI_SPLIT` census) that every branch was created by one of the seven known DT split operators, six of them tautological `p=0 ⊔ p≠0` dichotomies, and verifies the one data-dependent case — the `Factorize` equation split — satisfies `V(q)=V(fak1·fak2)` (same radical). Combined with **F**, the loop invariant `⋃V(live)=V(input)` proves `⋃V(cells)=V(input)` | cheap (factor + radical per split) |
 | **E** | **Per-cell passivity**: Δ-polynomial integrability conditions reduce to 0 mod the (prolonged) cell — the smoking-gun check for a premature-finish / missing-prolongation bug | heavy |
 | **F** | **Inconsistency certificates**: certifies that every branch the engine *pruned* (set `Inconsistent`) is genuinely empty — a rejection whose certificate fails is a wrongly-pruned non-empty branch | cheap, per record |
 
@@ -60,6 +61,15 @@ Jet variables `name[i,j,k]` are flattened to algebraic indeterminates
 - `record_inconsistent.sh` — run a `.mpl` through the instrumented source and
   capture the `OMRI_RECORD` lines (check F instrumentation; driven by
   `OPENMAPLE_RECORD_INCONSISTENT`).
+- `check_cover.py` — the cover verifier (**D′**). Reads a combined log and
+  certifies split-exhaustiveness: censuses `OMRI_SPLIT` operators (only the
+  seven known DT split sites may fire) and verifies `V(q)=V(fak1·fak2)` for every
+  `OMRI_FACTOR` equation split.
+- `inject_cover_hooks.py` + `make_cover_instrumented.sh` — build a DT source copy
+  at `/tmp/dt-cover-instr` carrying **both** the prune (`OMRI_RECORD`) hooks and
+  the cover (`OMRI_SPLIT` census + `OMRI_FACTOR` product) hooks, so one run feeds
+  both check F and check D′. Run hydrogen with `DT_SRC=/tmp/dt-cover-instr`, then:
+  `sage -python check_cover.py <log>` and `sage -python check_f.py <log> --ivars x,y,z`.
 
 ## Running
 
