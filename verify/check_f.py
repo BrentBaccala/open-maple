@@ -251,6 +251,27 @@ def universal_certify(rec, ivars):
             if os_ in eqs_set:
                 return True, "[placement=sat,shortcut] offender required !=0 is also a recorded equation (=0) -> empty: OK"
 
+    # SAT-role FAST certificate, tried BEFORE the costly full-ring build + bounded
+    # prolongation below: param-in-field membership. Collapse the ivars + constant
+    # parameters into the coefficient field K, leaving only the genuine jet
+    # unknowns as ring variables, so the cell Groebner basis is tiny where the
+    # full 53-var ring GB blows up (record 340: 53 ring vars / >11 h / 35 GB  ->
+    # 12 jet vars / 0.2 s). Sound for this placement: over K the cell-equation
+    # initials are units, so membership in the cell ideal equals membership in the
+    # saturated ideal (eqs):initials^inf — i.e. the required-!=0 offender vanishes
+    # on the cell. Returns immediately on success, skipping the heavy machinery.
+    if role == "sat":
+        try:
+            off_strs = [s for s in offenders if s.strip() not in ("", "0")]
+            if off_strs:
+                redf, _pf, _nv = vc.cell_field_reducer(
+                    {"equations": rec["eqs"]}, ivars, prolong_order=0, extra_strs=off_strs)
+                if all(redf(s) == 0 for s in off_strs):
+                    return True, ("[placement=sat] offender(s) reduce to 0 modulo the cell "
+                                  "over the parameter-in-field ring -> vanish on cell -> empty: OK")
+        except Exception:
+            pass
+
     base_strs = rec["eqs"] + rec["ineqs"] + offenders
     prolonged_eq_strs = _safe_prolong(rec["eqs"], ivars, PROLONG_MAX_ORDER)
     prolonged_off_strs = _safe_prolong(offenders, ivars, PROLONG_MAX_ORDER) if offenders else []
