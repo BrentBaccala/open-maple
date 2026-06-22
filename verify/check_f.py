@@ -287,13 +287,33 @@ def universal_certify(rec, ivars):
                        "equations, algebraic or prolonged) — POSSIBLE wrongly-pruned "
                        "NON-empty branch (offenders=%r)" % (rec["reason"], offenders))
 
-    # role == "sat": offenders are inequations (required !=0) that must vanish on cell
+    # role == "sat": offenders are inequations (required !=0) that must vanish on cell.
+    # FAST sufficient path: each offender lies in the saturated IDEAL (eqs):ineqs^inf
+    # (ideal membership, not radical) — then it vanishes on V(eqs)\V(ineqs), so the
+    # required-!=0 inequation is violated everywhere -> empty.  One GB of the
+    # saturated ideal, shared across offenders; far cheaper than a Rabinowitsch
+    # radical solve per offender.  Only if membership fails do we fall back to the
+    # full radical saturated_empty (and then to prolongation).
+    try:
+        RR, GB, up = vc.saturated_groebner(R, eqs, sats)
+        if all(vc.in_ideal_via_gb(RR, GB, up(o)) for o in offs):
+            return True, ("[placement=sat] offender(s) in saturated ideal (eqs):ineqs^inf "
+                          "-> vanish on cell -> empty: OK")
+    except Exception:
+        pass
     if vc.saturated_empty(R, eqs, sats + offs):
-        return True, "[placement=sat] offender(s) vanish on the cell (required !=0) -> empty (algebraic): OK"
+        return True, "[placement=sat] offender(s) vanish on the cell (radical, required !=0) -> empty: OK"
     p_eqs = [ev(s) for s in prolonged_eq_strs]
+    try:
+        RRp, GBp, upp = vc.saturated_groebner(R, p_eqs, sats)
+        if all(vc.in_ideal_via_gb(RRp, GBp, upp(o)) for o in offs):
+            return True, ("[placement=sat] offender(s) in saturated ideal of the "
+                          "prolonged cell (order %d) -> empty: OK" % PROLONG_MAX_ORDER)
+    except Exception:
+        pass
     if vc.saturated_empty(R, p_eqs, sats + offs):
         return True, ("[placement=sat] offender(s) vanish on the prolonged cell "
-                      "(order %d) -> empty: OK" % PROLONG_MAX_ORDER)
+                      "(radical, order %d) -> empty: OK" % PROLONG_MAX_ORDER)
     return False, ("[placement=sat] %s branch NOT certified empty (offending "
                    "inequation does not vanish on the cell, algebraic or prolonged) "
                    "— POSSIBLE wrongly-pruned NON-empty branch (offenders=%r)"
