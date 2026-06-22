@@ -106,11 +106,11 @@ diff -ru a/differentialsystems b/differentialsystems
    else
      l:=[];
    fi;
-+  lpre:=l;
++  lpre:=map(`@@PACKAGE@@/StandardForm`,l);
    l:=map(q->eval(`@@PACKAGE@@/ReduceWRTJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),q)),l);
    if select(a->`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0,l)<>[] or
        select(a->`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a),l)<>[] then
-+      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(`@@PACKAGE@@/StandardForm`,lpre[select(j->(`@@PACKAGE@@/Inequation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])=0) or (`@@PACKAGE@@/Equation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(l[j])),[seq(jj,jj=1..nops(l))])]), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
++      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(j->lpre[j],select(j->(`@@PACKAGE@@/Inequation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])=0) or (`@@PACKAGE@@/Equation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(l[j])),[seq(jj,jj=1..nops(l))])), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
        DifferentialSystem['Inconsistent']:=true
    fi;
    DifferentialSystem['Q']:=`@@PACKAGE@@/InsertIntoQList`(l,DifferentialSystem['Q']);
