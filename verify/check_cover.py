@@ -26,10 +26,12 @@
 #   * Factorize denominator split is also a binary  denom=0 XOR denom!=0.
 #   * Factorize EQUATION split is the ONE non-tautological case:
 #         q=0  <=>  (fak1=0)  XOR  (fak2=0 and fak1!=0)
-#     which is exhaustive IFF  fak1 * fak2 = q  (as associates).  Each such split
-#     emits OMRI_FACTOR|q|fak1|fak2; this tool verifies the product identity.
+#     where fak1,fak2 are q's DISTINCT irreducible factors, so fak1*fak2 is the
+#     RADICAL of q (e.g. q=V4^2*a1^6 splits on V4*a1 — same zero set).  Exhaustive
+#     IFF  V(q) = V(fak1*fak2)  (same radical, NOT polynomial equality).  Each such
+#     split emits OMRI_FACTOR|q|fak1|fak2; this tool checks the variety identity.
 #
-# A failed product identity = a factor split that could DROP solutions = a real
+# A failed variety identity = a factor split that could DROP solutions = a real
 # cover hole.  All identities holding + the census being clean + check_f PASS
 # ==> the decomposition covers the whole parameter space.
 
@@ -62,16 +64,25 @@ for op in sorted(census):
 if unknown:
     print("  *** UNKNOWN split operator(s): %s — static enumeration incomplete!" % unknown)
 
-# ---- 2. factor product identity:  fak1 * fak2 == q  (scalar associates) ---------
-def associates(p1, p2):
-    """True iff p1 and p2 are nonzero scalar multiples (same variety)."""
-    if p1 == 0 or p2 == 0:
-        return p1 == 0 and p2 == 0
-    d1, d2 = p1.dict(), p2.dict()
-    if set(d1) != set(d2):
-        return False
-    ratios = {c1 / d2[m] for m, c1 in d1.items()}
-    return len(ratios) == 1
+# ---- 2. factor split exhaustiveness:  V(q) == V(fak1*fak2) -----------------------
+# The Factorize EQUATION split sends q=0 to (fak1=0) XOR (fak2=0 & fak1!=0), where
+# fak1,fak2 are q's DISTINCT irreducible factors — so fak1*fak2 is the RADICAL of q,
+# not q itself (e.g. q = V4^2*a1^6 splits on V4*a1; both have the same zero set).
+# The cover condition is therefore equality of VARIETIES, V(q) = V(fak1*fak2), i.e.
+# q and fak1*fak2 share the same set of irreducible factors (multiplicity ignored).
+# This gives BOTH the cover direction V(q) subset V(fak1*fak2) (no solution dropped)
+# and the soundness direction V(fak1*fak2) subset V(q) (no solution added).
+def _radset(p):
+    """The set of distinct non-constant irreducible factors of p (each normalized
+    by Sage's factor(), so associates collapse). Empty for a nonzero constant."""
+    if p == 0:
+        return None  # the zero polynomial — degenerate, handled by caller
+    return frozenset(str(f) for f, _m in p.factor() if f.degree() > 0)
+
+def same_variety(p1, p2):
+    """True iff V(p1) == V(p2) over the algebraic closure (same radical)."""
+    r1, r2 = _radset(p1), _radset(p2)
+    return r1 is not None and r2 is not None and r1 == r2
 
 def san(s):
     return maple_parse.normalize_poly_string(s)
@@ -90,23 +101,23 @@ for l in factors:
     Q  = R(sage_eval(q,  locals=env))
     F1 = R(sage_eval(f1, locals=env))
     F2 = R(sage_eval(f2, locals=env))
-    if associates(F1 * F2, Q):
+    if same_variety(F1 * F2, Q):
         n_ok += 1
     else:
         n_bad += 1
         bad.append((q, f1, f2))
 
-print("\nfactor product identities (fak1*fak2 == q):")
+print("\nfactor split exhaustiveness (V(fak1*fak2) == V(q), same radical):")
 print("  %d OK, %d FAILED, %d skipped (RootOf — needs algebraic-extension check)"
       % (n_ok, n_bad, n_rootof))
 for q, f1, f2 in bad[:10]:
-    print("  *** FAIL: (%s)*(%s) != %s" % (f1, f2, q))
+    print("  *** FAIL: V((%s)*(%s)) != V(%s) [different radical]" % (f1, f2, q))
 
 # ---- 3. combined verdict --------------------------------------------------------
 ok = (not unknown) and n_bad == 0 and n_rootof == 0
 if ok:
     verdict = ("PASS — every split is exhaustive (binary tautologies + %d verified "
-               "factor products); only known operators fired" % n_ok)
+               "factor-split varieties); only known operators fired" % n_ok)
 else:
     verdict = "INCOMPLETE — see failures above"
 print("\nCOVER (split half): %s" % verdict)
