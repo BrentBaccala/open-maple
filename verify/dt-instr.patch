@@ -93,9 +93,24 @@ diff -ru a/factor b/factor
 diff -ru a/differentialsystems b/differentialsystems
 --- a/differentialsystems
 +++ b/differentialsystems
-@@ -463,4 +463,5 @@
+@@ -449,7 +449,7 @@
+ add_function("DifferentialSystemInequationImplied",{"@@PACKAGE@@All"}):
+ 
+ `@@PACKAGE@@/ReduceQListInSystem` := proc(DifferentialSystem)
+-local i,l;
++local i,l,lpre;
+   if DifferentialSystem['Ranking']['ReduceQListInSystem']="Inequations" then
+     l:=select(`@@PACKAGE@@/Inequation`,DifferentialSystem['Q']);
+     DifferentialSystem['Q']:=remove(`@@PACKAGE@@/Inequation`,DifferentialSystem['Q']);
+@@ -459,9 +459,11 @@
+   else
+     l:=[];
+   fi;
++  lpre:=l;
+   l:=map(q->eval(`@@PACKAGE@@/ReduceWRTJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),q)),l);
    if select(a->`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0,l)<>[] or
        select(a->`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a),l)<>[] then
-+      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(`@@PACKAGE@@/StandardForm`,select(a->(`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0) or (`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a)),l)), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
++      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(`@@PACKAGE@@/StandardForm`,lpre[select(j->(`@@PACKAGE@@/Inequation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])=0) or (`@@PACKAGE@@/Equation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(l[j])),[seq(jj,jj=1..nops(l))])]), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
        DifferentialSystem['Inconsistent']:=true
    fi;
+   DifferentialSystem['Q']:=`@@PACKAGE@@/InsertIntoQList`(l,DifferentialSystem['Q']);

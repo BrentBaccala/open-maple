@@ -123,16 +123,33 @@ def _build_ring(strs, ivars):
 def universal_certify(rec, ivars):
     """Universal emptiness certificate for the gap-#2 reasons.
 
-    The recorded branch is {eqs = 0, ineqs != 0}.  Each reason implies the
-    offending polynomial(s) must vanish on any surviving point, so we add them as
-    equations and ask whether the augmented branch is empty:
-        saturated_empty(eqs + offenders, ineqs)   ==  1 in (eqs+off):(prod ineqs)^inf
-    If the purely-algebraic test does not certify empty, prolong the eqs (and the
-    offenders) to a bounded total order and retry — a missing-prolongation reason
-    (reductive_prolong especially) only becomes empty after differentiation.
+    The recorded branch is {eqs = 0, ineqs != 0}.  Each reason supplies offending
+    polynomial(s) that force the branch empty, but the offender's ROLE depends on
+    the reason — and for reductive_prolong even on which sub-case fired:
+
+      * an offender that is an EQUATION the reason says must equal a nonzero
+        constant / must vanish (discriminant_exhaustion, factor_nonsquarefree,
+        leadcoeff_noninvertible, reductive_prolong's equation->field-element case)
+        is added as an EQUATION:  emptiness  <=>  saturated_empty(eqs+off, ineqs)
+        (a nonzero-constant offender makes 1 in the ideal directly).
+
+      * an offender that is an INEQUATION the reason says reduces to 0
+        (reductive_prolong's inequation->0 case) means the branch requires
+        off != 0 yet off == 0 on the whole cell, so it is added as a SATURATION:
+        emptiness  <=>  saturated_empty(eqs, ineqs+off)  ==  off vanishes on the
+        prolonged cell.
+
+    We do not need to know the sub-case: a record is certified empty if EITHER
+    placement (offenders-as-equations OR offenders-as-saturation) yields an empty
+    saturated system.  Both placements are sound emptiness witnesses; trying both
+    just removes the need to thread the per-offender equation/inequation flag
+    through the log.  If neither certifies on the recorded (algebraic) system, the
+    eqs and offenders are PROLONGED to a bounded order and both placements retried
+    — a missing-prolongation reason only becomes empty after differentiation.
+
+    A record that survives all of these is a wrongly-pruned NON-empty branch.
     """
     offenders = rec["offenders"]
-    # ring over all strings we will evaluate (base + bounded prolongation set)
     base_strs = rec["eqs"] + rec["ineqs"] + offenders
     prolonged_eq_strs = vc.prolong_strings(rec["eqs"], ivars, PROLONG_MAX_ORDER)
     prolonged_off_strs = vc.prolong_strings(offenders, ivars, PROLONG_MAX_ORDER) if offenders else []
@@ -144,27 +161,34 @@ def universal_certify(rec, ivars):
 
     eqs = [ev(s) for s in rec["eqs"]]
     ineqs = [ev(s) for s in rec["ineqs"]]
-    offs = [ev(s) for s in offenders]
+    offs = [o for o in (ev(s) for s in offenders) if o != 0]  # 0 offenders are inert
     ivar_sats = [R(v) for v in ivars]
     sats = ineqs + ivar_sats
 
-    # 1) purely-algebraic saturated emptiness
-    if vc.saturated_empty(R, eqs + offs, sats):
-        return True, ("branch {eqs=0, offenders=0, ineqs!=0} empty (algebraic): OK"
-                      if offs else
-                      "branch {eqs=0, ineqs!=0} empty (algebraic): OK")
-
-    # an offender that is itself a nonzero field constant is an immediate unit-contradiction
+    # immediate unit-contradiction: an offender that is a nonzero field constant
     for o in offs:
         jetvars_in = [v for v in R.gens() if str(v) not in ivars and o.degree(v) > 0]
-        if not jetvars_in and o != 0:
+        if not jetvars_in:  # o != 0 already guaranteed
             return True, "an offender is a nonzero field constant (unit=0 contradiction) -> empty: OK"
 
-    # 2) prolongation fallback
+    # 1) offenders-as-equations (must-vanish) — algebraic
+    if vc.saturated_empty(R, eqs + offs, sats):
+        return True, ("branch {eqs=0, offenders=0, ineqs!=0} empty (algebraic): OK"
+                      if offs else "branch {eqs=0, ineqs!=0} empty (algebraic): OK")
+
+    # 2) offenders-as-saturation (must be != 0 but vanish on the cell) — algebraic
+    if offs and vc.saturated_empty(R, eqs, sats + offs):
+        return True, "offender(s) vanish on the cell (required !=0) -> empty (algebraic): OK"
+
+    # 3) prolongation fallback, both placements
     p_eqs = [ev(s) for s in prolonged_eq_strs]
-    p_offs = [ev(s) for s in prolonged_off_strs]
+    p_offs = [o for o in (ev(s) for s in prolonged_off_strs) if o != 0]
     if vc.saturated_empty(R, p_eqs + p_offs, sats):
-        return True, ("branch empty after prolongation to order %d: OK" % PROLONG_MAX_ORDER)
+        return True, ("branch empty after prolongation to order %d (offenders=eqs): OK"
+                      % PROLONG_MAX_ORDER)
+    if offs and vc.saturated_empty(R, p_eqs, sats + offs):
+        return True, ("offender(s) vanish on the prolonged cell (order %d) -> empty: OK"
+                      % PROLONG_MAX_ORDER)
 
     # not certified empty -> wrongly-pruned NON-empty branch
     if rec["reason"] == "dup_inequation":
