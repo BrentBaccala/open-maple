@@ -17,9 +17,22 @@
 #   factor             : 2 sites — non-squarefree factoring RootOf->non-RootOf (59,
 #                        reason factor_nonsquarefree); "leading coefficient should be
 #                        invertible" catch (124, reason leadcoeff_noninvertible).
-#   differentialsystems: 1 site  — ReduceQListInSystem reductive-prolongation check,
-#                        an inequation reduced to 0 OR an equation reduced to a
-#                        nonzero field element (465, reason reductive_prolong).
+#   differentialsystems: 1 site  — ReduceQListInSystem reductive-prolongation check
+#                        (465). This ONE site emits up to TWO role-tagged records so
+#                        the emptiness certificate uses the correct (and only the
+#                        correct) placement per offender:
+#                          reductive_prolong    — an inequation reduced to 0
+#                                                 (offenders certified as SATURATION:
+#                                                  they are required !=0 yet vanish);
+#                          reductive_prolong_eq — an equation reduced to a nonzero
+#                                                 field element (offenders certified
+#                                                 as EQUATIONS: they must vanish).
+#
+# => 11 Inconsistent:=true sites, 12 OMRI_RECORD printf hooks (differentialsystems
+#    contributes 2). Role-tagging is required for soundness: a "try both placements"
+#    certificate can mask a real over-prune (a must-vanish equation that vanishes on
+#    the cell trivially satisfies the inequation placement while the actually-pruned
+#    branch is non-empty), so each reason fixes a single offender role.
 #
 # Idempotent: re-copies fresh each time, then patches.
 set -euo pipefail
@@ -35,4 +48,4 @@ cp -r "$SRC" "$DST"
 patch -p1 -d "$DST" < "$PATCH"
 
 echo "instrumented DT source ready at $DST"
-echo "  OMRI_RECORD hooks: $(grep -rh 'OMRI_RECORD' "$DST"/main "$DST"/reduction "$DST"/strategy "$DST"/algebraic "$DST"/factor "$DST"/differentialsystems | wc -l) (expected 11)"
+echo "  OMRI_RECORD hooks: $(grep -rh 'OMRI_RECORD' "$DST"/main "$DST"/reduction "$DST"/strategy "$DST"/algebraic "$DST"/factor "$DST"/differentialsystems | wc -l) (expected 12: 11 Inconsistent sites, differentialsystems emits 2 role-tagged records)"

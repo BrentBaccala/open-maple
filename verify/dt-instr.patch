@@ -102,7 +102,7 @@ diff -ru a/differentialsystems b/differentialsystems
    if DifferentialSystem['Ranking']['ReduceQListInSystem']="Inequations" then
      l:=select(`@@PACKAGE@@/Inequation`,DifferentialSystem['Q']);
      DifferentialSystem['Q']:=remove(`@@PACKAGE@@/Inequation`,DifferentialSystem['Q']);
-@@ -459,9 +459,11 @@
+@@ -459,9 +459,12 @@
    else
      l:=[];
    fi;
@@ -110,7 +110,8 @@ diff -ru a/differentialsystems b/differentialsystems
    l:=map(q->eval(`@@PACKAGE@@/ReduceWRTJanetTrees`(`@@PACKAGE@@/DifferentialSystemJanetTrees`(DifferentialSystem),q)),l);
    if select(a->`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0,l)<>[] or
        select(a->`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a),l)<>[] then
-+      printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(j->lpre[j],select(j->(`@@PACKAGE@@/Inequation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])=0) or (`@@PACKAGE@@/Equation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(l[j])),[seq(jj,jj=1..nops(l))])), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem));
++      if select(a->`@@PACKAGE@@/Inequation`(a) and `@@PACKAGE@@/StandardForm`(a)=0,l)<>[] then printf("OMRI_RECORD|reductive_prolong|%a|EQS|%a|INEQS|%a\n", map(j->lpre[j],select(j->`@@PACKAGE@@/Inequation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])=0,[seq(jj,jj=1..nops(l))])), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem)); fi;
++      if select(a->`@@PACKAGE@@/Equation`(a) and `@@PACKAGE@@/StandardForm`(a)<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(a),l)<>[] then printf("OMRI_RECORD|reductive_prolong_eq|%a|EQS|%a|INEQS|%a\n", map(j->lpre[j],select(j->`@@PACKAGE@@/Equation`(l[j]) and `@@PACKAGE@@/StandardForm`(l[j])<>0 and `@@PACKAGE@@/IsDifferentialFieldElement`(l[j]),[seq(jj,jj=1..nops(l))])), `@@PACKAGE@@/DifferentialSystemEquations`(DifferentialSystem), `@@PACKAGE@@/DifferentialSystemInequations`(DifferentialSystem)); fi;
        DifferentialSystem['Inconsistent']:=true
    fi;
    DifferentialSystem['Q']:=`@@PACKAGE@@/InsertIntoQList`(l,DifferentialSystem['Q']);

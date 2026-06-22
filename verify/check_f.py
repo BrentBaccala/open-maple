@@ -99,104 +99,204 @@ def parse_record(line):
     }
 
 
-# Reasons closed by completeness gap #2 — certified by the universal
-# emptiness certificate (saturated_empty + prolongation fallback) below.
-UNIVERSAL_REASONS = (
-    "discriminant_exhaustion",
-    "dup_inequation",
-    "factor_nonsquarefree",
-    "leadcoeff_noninvertible",
-    "reductive_prolong",
-)
+# Reasons closed by completeness gap #2 — certified by the role-aware emptiness
+# certificate below.  Each reason fixes the offender's ROLE; the certificate tests
+# ONLY that role's placement (no "try the other placement" fallback, which would
+# be UNSOUND — see ROLE_OF_REASON).
+#
+#   EQUATION role  ("eq"):   the reason says the offending polynomial must VANISH
+#                            on every surviving point (a discriminant that had to
+#                            be 0, a factor forced to 0, a leading coeff forced to
+#                            0, an equation that reduced to a nonzero field
+#                            constant).  Certify: saturated_empty(eqs+off, ineqs).
+#                            A nonzero-constant offender puts 1 in the ideal
+#                            directly.
+#
+#   SATURATION role ("sat"): the reason says the offending polynomial is an
+#                            INEQUATION (required != 0) that REDUCED TO 0, i.e. it
+#                            vanishes on the whole cell, contradicting != 0.
+#                            Certify: saturated_empty(eqs, ineqs+off)  ==  off
+#                            vanishes on V(eqs)\V(ineqs).
+#
+#   NONE role:               no offender (dup_inequation); the branch
+#                            {eqs=0, ineqs!=0} must itself be empty.
+#
+# WHY single-role (not "try both"): the recorded pruning is ONE specific branch
+# with ONE offender role.  If a must-vanish EQUATION offender happens to also
+# vanish on the cell, the SATURATION test (off != 0) would return "empty"
+# trivially, while the ACTUALLY-pruned branch {off = 0 = the whole cell} can be
+# NON-empty -> a false PASS that masks the exact over-prune we are hunting.  So
+# each reason must use only its own role's placement.
+ROLE_OF_REASON = {
+    "discriminant_exhaustion": "eq",
+    "factor_nonsquarefree":    "eq",
+    "leadcoeff_noninvertible": "eq",
+    "reductive_prolong_eq":    "eq",
+    "reductive_prolong":       "sat",
+    "dup_inequation":          "none",
+}
+UNIVERSAL_REASONS = tuple(ROLE_OF_REASON.keys())
 
 PROLONG_MAX_ORDER = 2  # bounded prolongation order for the fallback
+PER_RECORD_TIMEOUT = 120  # seconds; a record exceeding this is reported NEEDS-REVIEW
+
+
+class _Timeout(Exception):
+    pass
+
+
+class record_timeout:
+    """SIGALRM-based per-record wall cap so one hard Groebner cannot hang the run."""
+    def __init__(self, secs):
+        self.secs = secs
+    def __enter__(self):
+        import signal
+        self._old = signal.signal(signal.SIGALRM, self._raise)
+        signal.alarm(self.secs)
+        return self
+    def __exit__(self, *a):
+        import signal
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, self._old)
+        return False
+    @staticmethod
+    def _raise(signum, frame):
+        raise _Timeout()
+
+
+def _safe_prolong(strs, ivars, order):
+    """vc.prolong_strings, but tolerant of jets whose flattened index tuple is
+    shorter than len(ivars) (which would otherwise IndexError in raise_index_var).
+    Such a string is left un-prolonged rather than crashing the whole record."""
+    if not strs:
+        return []
+    try:
+        return vc.prolong_strings(strs, ivars, order)
+    except (IndexError, Exception):
+        # prolong each independently; drop the ones that can't be differentiated
+        out = list(strs)
+        for s in strs:
+            try:
+                for d in vc.prolong_strings([s], ivars, order):
+                    if d not in out:
+                        out.append(d)
+            except Exception:
+                pass
+        return out
 
 
 def _build_ring(strs, ivars):
+    """Build the polynomial ring over ONLY the variables that actually appear in
+    `strs` (jet vars + any ivar that appears).  This per-record restriction is
+    sound for emptiness — 1 in (gens):(sats)^inf over QQ[appearing-vars] iff over
+    QQ[all-vars], since free variables don't affect satisfiability — and keeps the
+    Groebner small instead of forcing the full ~60-variable ring on every record."""
     jetset = vc.collect_vars(strs)
-    ringvars = sorted(jetset) + [v for v in ivars if v not in jetset]
-    R = PolynomialRing(QQ, ringvars if ringvars else list(ivars), order="degrevlex")
+    # only include ivars that genuinely occur (as bare tokens) in the strings
+    present_ivars = [v for v in ivars
+                     if any(re.search(r'(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_\[])' % re.escape(v), s)
+                            for s in strs)]
+    ringvars = sorted(jetset) + [v for v in present_ivars if v not in jetset]
+    if not ringvars:
+        ringvars = [ivars[0]] if ivars else ["__dummy"]
+    R = PolynomialRing(QQ, ringvars, order="degrevlex")
     env = {v: R(v) for v in R.variable_names()}
-    return R, env
+    return R, env, present_ivars
 
 
 def universal_certify(rec, ivars):
-    """Universal emptiness certificate for the gap-#2 reasons.
+    """Role-aware emptiness certificate for the gap-#2 reasons.
 
-    The recorded branch is {eqs = 0, ineqs != 0}.  Each reason supplies offending
-    polynomial(s) that force the branch empty, but the offender's ROLE depends on
-    the reason — and for reductive_prolong even on which sub-case fired:
-
-      * an offender that is an EQUATION the reason says must equal a nonzero
-        constant / must vanish (discriminant_exhaustion, factor_nonsquarefree,
-        leadcoeff_noninvertible, reductive_prolong's equation->field-element case)
-        is added as an EQUATION:  emptiness  <=>  saturated_empty(eqs+off, ineqs)
-        (a nonzero-constant offender makes 1 in the ideal directly).
-
-      * an offender that is an INEQUATION the reason says reduces to 0
-        (reductive_prolong's inequation->0 case) means the branch requires
-        off != 0 yet off == 0 on the whole cell, so it is added as a SATURATION:
-        emptiness  <=>  saturated_empty(eqs, ineqs+off)  ==  off vanishes on the
-        prolonged cell.
-
-    We do not need to know the sub-case: a record is certified empty if EITHER
-    placement (offenders-as-equations OR offenders-as-saturation) yields an empty
-    saturated system.  Both placements are sound emptiness witnesses; trying both
-    just removes the need to thread the per-offender equation/inequation flag
-    through the log.  If neither certifies on the recorded (algebraic) system, the
-    eqs and offenders are PROLONGED to a bounded order and both placements retried
-    — a missing-prolongation reason only becomes empty after differentiation.
-
-    A record that survives all of these is a wrongly-pruned NON-empty branch.
+    The recorded branch is {eqs = 0, ineqs != 0}.  The offending polynomial's role
+    is fixed by the reason (ROLE_OF_REASON); we test ONLY that placement, both on
+    the recorded (algebraic) system and after a bounded prolongation, and report
+    WHICH placement certified.  No cross-role fallback (that would be unsound).
     """
+    role = ROLE_OF_REASON[rec["reason"]]
     offenders = rec["offenders"]
+
+    # ---- cheap structural shortcuts (no Groebner) -------------------------------
+    eqs_set = set(s.strip() for s in rec["eqs"])
+    ineqs_set = set(s.strip() for s in rec["ineqs"])
+    for o in offenders:
+        os_ = o.strip()
+        if os_ in ("", "0"):
+            continue
+        # nonzero numeric constant offender
+        try:
+            if role == "eq" and float(os_) != 0.0:
+                return True, "[placement=eq,shortcut] offender is a nonzero constant (1 in ideal) -> empty: OK"
+        except ValueError:
+            pass
+        if role == "eq":
+            # offender must vanish but it is itself a recorded inequation -> v=0 & v!=0
+            if os_ in ineqs_set:
+                return True, "[placement=eq,shortcut] offender required =0 is also an inequation (!=0) -> empty: OK"
+        if role == "sat":
+            # offender (an inequation, required !=0) is literally a recorded equation (=0)
+            if os_ in eqs_set:
+                return True, "[placement=sat,shortcut] offender required !=0 is also a recorded equation (=0) -> empty: OK"
+
     base_strs = rec["eqs"] + rec["ineqs"] + offenders
-    prolonged_eq_strs = vc.prolong_strings(rec["eqs"], ivars, PROLONG_MAX_ORDER)
-    prolonged_off_strs = vc.prolong_strings(offenders, ivars, PROLONG_MAX_ORDER) if offenders else []
-    all_strs = base_strs + prolonged_eq_strs + prolonged_off_strs
-    R, env = _build_ring(all_strs, ivars)
+    prolonged_eq_strs = _safe_prolong(rec["eqs"], ivars, PROLONG_MAX_ORDER)
+    prolonged_off_strs = _safe_prolong(offenders, ivars, PROLONG_MAX_ORDER) if offenders else []
+    R, env, present_ivars = _build_ring(base_strs + prolonged_eq_strs + prolonged_off_strs, ivars)
 
     def ev(s):
         return R(sage_eval(s, locals=env))
 
     eqs = [ev(s) for s in rec["eqs"]]
     ineqs = [ev(s) for s in rec["ineqs"]]
-    offs = [o for o in (ev(s) for s in offenders) if o != 0]  # 0 offenders are inert
-    ivar_sats = [R(v) for v in ivars]
+    offs = [o for o in (ev(s) for s in offenders) if o != 0]  # literal-0 offenders are inert
+    ivar_sats = [R(v) for v in present_ivars]  # only saturate by ivars that appear
     sats = ineqs + ivar_sats
 
-    # immediate unit-contradiction: an offender that is a nonzero field constant
-    for o in offs:
-        jetvars_in = [v for v in R.gens() if str(v) not in ivars and o.degree(v) > 0]
-        if not jetvars_in:  # o != 0 already guaranteed
-            return True, "an offender is a nonzero field constant (unit=0 contradiction) -> empty: OK"
+    if role == "none":  # dup_inequation: the branch itself must be empty
+        if vc.saturated_empty(R, eqs, sats):
+            return True, "[placement=none] branch {eqs=0, ineqs!=0} empty (algebraic): OK"
+        p_eqs = [ev(s) for s in prolonged_eq_strs]
+        if vc.saturated_empty(R, p_eqs, sats):
+            return True, ("[placement=none] branch empty after prolongation order %d: OK"
+                          % PROLONG_MAX_ORDER)
+        return False, ("[placement=none] dup_inequation branch NOT empty even after "
+                       "prolongation — LIKELY REAL OVER-PRUNING BUG (duplicate "
+                       "inequation is not an emptiness reason; branch has solutions)")
 
-    # 1) offenders-as-equations (must-vanish) — algebraic
-    if vc.saturated_empty(R, eqs + offs, sats):
-        return True, ("branch {eqs=0, offenders=0, ineqs!=0} empty (algebraic): OK"
-                      if offs else "branch {eqs=0, ineqs!=0} empty (algebraic): OK")
+    if not offs:
+        # role expects an offender but every recorded offender is literal 0:
+        # the role's contradiction can't be exhibited -> fall back to bare branch.
+        if vc.saturated_empty(R, eqs, sats):
+            return True, "[placement=%s,no-offender] bare branch empty (algebraic): OK" % role
+        return False, ("[placement=%s] no usable (nonzero) offender recorded and bare "
+                       "branch NOT empty — cannot certify (instrumentation gap?)" % role)
 
-    # 2) offenders-as-saturation (must be != 0 but vanish on the cell) — algebraic
-    if offs and vc.saturated_empty(R, eqs, sats + offs):
-        return True, "offender(s) vanish on the cell (required !=0) -> empty (algebraic): OK"
+    if role == "eq":
+        # offenders must VANISH on the surviving branch
+        for o in offs:  # a nonzero field constant (no jet vars) -> 1 in ideal directly
+            jetvars_in = [v for v in o.variables() if str(v) not in present_ivars]
+            if not jetvars_in:  # o involves only ivars/constants and o != 0
+                return True, "[placement=eq] offender is a nonzero field element (1 in ideal) -> empty: OK"
+        if vc.saturated_empty(R, eqs + offs, sats):
+            return True, "[placement=eq] {eqs=0, offenders=0, ineqs!=0} empty (algebraic): OK"
+        p_eqs = [ev(s) for s in prolonged_eq_strs]
+        p_offs = [o for o in (ev(s) for s in prolonged_off_strs) if o != 0]
+        if vc.saturated_empty(R, p_eqs + p_offs, sats):
+            return True, ("[placement=eq] empty after prolongation order %d: OK"
+                          % PROLONG_MAX_ORDER)
+        return False, ("[placement=eq] %s branch NOT certified empty (offenders as "
+                       "equations, algebraic or prolonged) — POSSIBLE wrongly-pruned "
+                       "NON-empty branch (offenders=%r)" % (rec["reason"], offenders))
 
-    # 3) prolongation fallback, both placements
+    # role == "sat": offenders are inequations (required !=0) that must vanish on cell
+    if vc.saturated_empty(R, eqs, sats + offs):
+        return True, "[placement=sat] offender(s) vanish on the cell (required !=0) -> empty (algebraic): OK"
     p_eqs = [ev(s) for s in prolonged_eq_strs]
-    p_offs = [o for o in (ev(s) for s in prolonged_off_strs) if o != 0]
-    if vc.saturated_empty(R, p_eqs + p_offs, sats):
-        return True, ("branch empty after prolongation to order %d (offenders=eqs): OK"
-                      % PROLONG_MAX_ORDER)
-    if offs and vc.saturated_empty(R, p_eqs, sats + offs):
-        return True, ("offender(s) vanish on the prolonged cell (order %d) -> empty: OK"
-                      % PROLONG_MAX_ORDER)
-
-    # not certified empty -> wrongly-pruned NON-empty branch
-    if rec["reason"] == "dup_inequation":
-        return False, ("dup_inequation branch NOT empty even after prolongation — "
-                       "LIKELY REAL OVER-PRUNING BUG (duplicate inequation is not an "
-                       "emptiness reason; the surviving branch has solutions)")
-    return False, ("%s branch NOT certified empty (algebraic or prolonged) — "
-                   "POSSIBLE wrongly-pruned NON-empty branch (offenders=%r)"
+    if vc.saturated_empty(R, p_eqs, sats + offs):
+        return True, ("[placement=sat] offender(s) vanish on the prolonged cell "
+                      "(order %d) -> empty: OK" % PROLONG_MAX_ORDER)
+    return False, ("[placement=sat] %s branch NOT certified empty (offending "
+                   "inequation does not vanish on the cell, algebraic or prolonged) "
+                   "— POSSIBLE wrongly-pruned NON-empty branch (offenders=%r)"
                    % (rec["reason"], offenders))
 
 
@@ -267,17 +367,38 @@ def main():
     args = ap.parse_args()
     ivars = [v.strip() for v in args.ivars.split(",") if v.strip()]
     lines = [l for l in open(args.logfile) if l.startswith("OMRI_RECORD|")]
-    print("read %d inconsistency record(s); ivars=%s" % (len(lines), ivars))
+    print("read %d inconsistency record(s); ivars=%s" % (len(lines), ivars), flush=True)
     allok = True
+    n_review = 0
+    failed = []
     for i, line in enumerate(lines, 1):
         rec = parse_record(line)
-        ok, msg = certify(rec, ivars)
-        print("  record %d [%s]: %s -- %s"
-              % (i, rec["reason"], "CERTIFIED-EMPTY" if ok else "FAILED", msg))
-        allok = allok and ok
-    print("CHECK F: %s" % ("PASS (all rejections genuinely empty)" if allok
-                           else "FAIL (a rejection was not certified empty)"))
-    return 0 if allok else 1
+        try:
+            with record_timeout(PER_RECORD_TIMEOUT):
+                ok, msg = certify(rec, ivars)
+            status = "CERTIFIED-EMPTY" if ok else "FAILED"
+        except _Timeout:
+            ok, status = None, "NEEDS-REVIEW(timeout %ds)" % PER_RECORD_TIMEOUT
+            msg = ("certification exceeded the per-record timeout — not certified "
+                   "empty and not refuted; offenders=%r" % rec["offenders"])
+            n_review += 1
+        except Exception as e:
+            ok, status = None, "NEEDS-REVIEW(error)"
+            msg = "certification raised %s: %s" % (type(e).__name__, e)
+            n_review += 1
+        print("  record %d [%s]: %s -- %s" % (i, rec["reason"], status, msg), flush=True)
+        if ok is False:
+            failed.append((i, rec["reason"]))
+        if ok is not True:
+            allok = False
+    print("CHECK F: %s (%d records; %d FAILED, %d NEEDS-REVIEW)"
+          % ("PASS (all rejections genuinely empty)" if allok and n_review == 0
+             else ("FAIL — a rejection was not certified empty" if failed
+                   else "INCONCLUSIVE — some records need review"),
+             len(lines), len(failed), n_review), flush=True)
+    if failed:
+        print("  FAILED records: %s" % failed, flush=True)
+    return 0 if (allok and n_review == 0) else 1
 
 
 if __name__ == "__main__":
