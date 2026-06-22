@@ -145,23 +145,37 @@ class _Timeout(Exception):
     pass
 
 
-class record_timeout:
-    """SIGALRM-based per-record wall cap so one hard Groebner cannot hang the run."""
-    def __init__(self, secs):
-        self.secs = secs
-    def __enter__(self):
-        import signal
-        self._old = signal.signal(signal.SIGALRM, self._raise)
-        signal.alarm(self.secs)
-        return self
-    def __exit__(self, *a):
-        import signal
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, self._old)
-        return False
-    @staticmethod
-    def _raise(signum, frame):
+def _certify_worker(rec, ivars, dvars, q):
+    # runs in a child process so a C-level (Singular) computation can be HARD-killed
+    global _DVAR_ORDER
+    _DVAR_ORDER = dvars
+    try:
+        q.put(certify(rec, ivars))
+    except Exception as e:
+        q.put(("__error__", "%s: %s" % (type(e).__name__, e)))
+
+
+def certify_with_timeout(rec, ivars, dvars, secs):
+    """Run certify() in a child process with a HARD wall kill.  A SIGALRM cannot
+    interrupt Singular's C-level Groebner/pseudo-division, so the per-record cap
+    must terminate a separate process.  Returns (ok, msg) or raises _Timeout."""
+    import multiprocessing as mp
+    ctx = mp.get_context("fork")
+    q = ctx.Queue()
+    p = ctx.Process(target=_certify_worker, args=(rec, ivars, dvars, q))
+    p.start()
+    p.join(secs)
+    if p.is_alive():
+        p.terminate()
+        p.join()
         raise _Timeout()
+    try:
+        res = q.get_nowait()
+    except Exception:
+        raise _Timeout()
+    if isinstance(res, tuple) and len(res) == 2 and res[0] == "__error__":
+        raise RuntimeError(res[1])
+    return res
 
 
 def _safe_prolong(strs, ivars, order):
@@ -288,12 +302,32 @@ def universal_certify(rec, ivars):
                        "NON-empty branch (offenders=%r)" % (rec["reason"], offenders))
 
     # role == "sat": offenders are inequations (required !=0) that must vanish on cell.
-    # FAST sufficient path: each offender lies in the saturated IDEAL (eqs):ineqs^inf
-    # (ideal membership, not radical) — then it vanishes on V(eqs)\V(ineqs), so the
-    # required-!=0 inequation is violated everywhere -> empty.  One GB of the
-    # saturated ideal, shared across offenders; far cheaper than a Rabinowitsch
-    # radical solve per offender.  Only if membership fails do we fall back to the
-    # full radical saturated_empty (and then to prolongation).
+    # FASTEST sufficient path — TRIANGULAR PSEUDO-REDUCTION (no Groebner): the
+    # engine reduced the offending inequation to 0 via ReduceWRTJanetTrees, i.e.
+    # triangular pseudo-reduction modulo the cell's equations (a triangular set).
+    # We replicate that independently with vc.ritt_reduce: if the pseudo-remainder
+    # of the offender modulo `eqs` is 0, the offender lies in (eqs):(initials)^inf,
+    # which vanishes on V(eqs)\V(initials); the cell's inequations keep the initials
+    # nonzero, so the required-!=0 offender vanishes everywhere on the cell -> empty.
+    # This is the SAME reduction DT performed and avoids any 60-var Groebner basis
+    # (those are intractable on the dense parameter cells).
+    DVAR_ORDER = globals().get("_DVAR_ORDER") or list(ivars)
+    try:
+        if all(vc.ritt_reduce(R, o, eqs, DVAR_ORDER, present_ivars) == 0 for o in offs):
+            return True, ("[placement=sat] offender(s) pseudo-reduce to 0 modulo the cell "
+                          "(triangular Ritt reduction) -> vanish on cell -> empty: OK")
+    except Exception:
+        pass
+    # next: each offender lies in ideal(eqs) ALONE (GB of cell equations, no sat var).
+    try:
+        Ieq = R.ideal(eqs) if eqs else R.ideal([R(0)])
+        GBe = Ieq.groebner_basis()
+        if all(R(o).reduce(GBe) == 0 for o in offs):
+            return True, "[placement=sat] offender(s) in ideal(eqs) -> vanish on cell -> empty: OK"
+    except Exception:
+        pass
+    # next sufficient path: each offender lies in the SATURATED ideal (eqs):ineqs^inf
+    # (handles the case where vanishing needs the inequations saturated out).
     try:
         RR, GB, up = vc.saturated_groebner(R, eqs, sats)
         if all(vc.in_ideal_via_gb(RR, GB, up(o)) for o in offs):
@@ -384,18 +418,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logfile")
     ap.add_argument("--ivars", default="x,y,z")
+    ap.add_argument("--dvars",
+                    default="DDPs,DPs,Ps,Vf,rho,V1,V2,V3,V4,a0,a1,b0,b1,c0,c1",
+                    help="dependent-variable ranking order (highest first) for the "
+                         "triangular Ritt pseudo-reduction certificate; default is the "
+                         "hydrogen DVar list")
     args = ap.parse_args()
     ivars = [v.strip() for v in args.ivars.split(",") if v.strip()]
+    global _DVAR_ORDER
+    _DVAR_ORDER = [v.strip() for v in args.dvars.split(",") if v.strip()]
     lines = [l for l in open(args.logfile) if l.startswith("OMRI_RECORD|")]
-    print("read %d inconsistency record(s); ivars=%s" % (len(lines), ivars), flush=True)
+    print("read %d inconsistency record(s); ivars=%s; dvars=%s"
+          % (len(lines), ivars, _DVAR_ORDER), flush=True)
     allok = True
     n_review = 0
     failed = []
     for i, line in enumerate(lines, 1):
         rec = parse_record(line)
         try:
-            with record_timeout(PER_RECORD_TIMEOUT):
-                ok, msg = certify(rec, ivars)
+            ok, msg = certify_with_timeout(rec, ivars, _DVAR_ORDER, PER_RECORD_TIMEOUT)
             status = "CERTIFIED-EMPTY" if ok else "FAILED"
         except _Timeout:
             ok, status = None, "NEEDS-REVIEW(timeout %ds)" % PER_RECORD_TIMEOUT
