@@ -67,6 +67,15 @@ B = "+".join(f"{(i % 3) + 1}*x^{i % 4}*z^{i % 5}" for i in range(20000))
 q = S.parse_in_ring(f"({A})*({B})^-1", F)
 check("large rational (A)*(B)^-1 parses", q != 0)
 
+# 4) comma argument-lists must survive: rebalance must NOT collapse f(x,y,z)
+#    into f((x,y,z)) (a single tuple arg). Check via parse_symbolic on diff().
+from sage.calculus.functional import diff as _diff  # noqa: E402,F401
+for s in ["diff(Ps(x, y, z), x)",
+          "diff(Ps(x, y, z) + Ps(x, y, z), y)",
+          "cos(x)*Ps(x, y, z)"]:
+    e = S.parse_symbolic(s, ['x', 'y', 'z'])
+    check("symbolic arg-list preserved: " + s[:40], e is not None)
+
 print()
 print("PASS" if failures == 0 else f"{failures} FAILURE(S)")
 sys.exit(1 if failures else 0)

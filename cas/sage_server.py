@@ -111,6 +111,24 @@ def ring_namespace(R):
 # still does all the algebra, and the reassociation is exact over QQ.
 # ---------------------------------------------------------------------------
 
+def _split_top_commas(s):
+    """Split s on commas at paren-depth 0 (function argument lists). Returns a
+    single-element list when there is no top-level comma."""
+    parts = []
+    depth = 0
+    start = 0
+    for i, c in enumerate(s):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            parts.append(s[start:i])
+            start = i + 1
+    parts.append(s[start:])
+    return parts
+
+
 def _split_top_additive(s):
     """Split s into signed additive terms at paren-depth 0.
 
@@ -174,6 +192,13 @@ def rebalance(s):
     trees, recursing into parenthesised subexpressions. Keeps the AST depth
     handed to compile() at O(log N), avoiding the astfold_expr C-stack overflow
     on huge expanded polynomials."""
+    # A top-level comma is an argument-list separator (e.g. diff(Ps(x,y,z), x)),
+    # NOT an additive operator: rebalance each argument independently and rejoin
+    # with commas, WITHOUT wrapping the list in parens (which would collapse the
+    # arguments into a single Python tuple).
+    args = _split_top_commas(s)
+    if len(args) > 1:
+        return ','.join(rebalance(a) for a in args)
     terms = [_rebalance_parens(t) for t in _split_top_additive(s)]
     return _balanced_join(terms)
 
