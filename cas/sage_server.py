@@ -364,6 +364,31 @@ def arg_poly_str(a):
     raise ValueError("cannot stringify arg: %r" % (a,))
 
 
+def decode_into_ring(a, R):
+    """decode_arg, but a BARE SCALAR result (a Python/Sage int from an {"int"}
+    arg, or a ref/poly that reduced to a plain integer/rational in ZZ/QQ) is
+    lifted into the ring R so the consuming op's polynomial methods
+    (.degree(x)/.coefficient/.factor/...) work — a raw Sage Integer's .degree()
+    takes no positional argument (the ex4 primpart->1->degree crash).
+
+    A genuine ring element OR a fraction-field element is returned UNCHANGED: we
+    must NOT force a rational function into a polynomial ring (that raises
+    "fraction must have unit denominator") — ops that legitimately handle
+    fractions keep their own ring. The lift only applies to scalars that have no
+    polynomial structure of their own."""
+    v = decode_arg(a, R)
+    try:
+        p = v.parent()
+    except Exception:
+        # not a Sage element at all (e.g. a python int from {"raw"}) -> lift
+        return R(v)
+    # Lift only plain ZZ/QQ scalars; leave polynomial rings and fraction fields
+    # (which already have the right methods / must not be force-coerced) alone.
+    if p in (ZZ, QQ):
+        return R(v)
+    return v
+
+
 def decode_arg(a, R):
     """Decode one request arg into a ring element (or python scalar)."""
     if "poly" in a:
@@ -449,7 +474,7 @@ def op_factor(req):
     builds the Maple List from this structured form).
     """
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if p == 0:
         return {"factors": {"unit": "0", "factors": []}}
     F = p.factor()
@@ -460,8 +485,8 @@ def op_factor(req):
 
 def op_gcd(req):
     R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
+    a = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
+    b = decode_into_ring(req["args"][1], R)
     return enc_poly(a.gcd(b))
 
 
@@ -472,9 +497,9 @@ def op_lcm(req):
     args = req["args"]
     if not args:
         return enc_poly(R(1))
-    acc = decode_arg(args[0], R)
+    acc = decode_into_ring(args[0], R)  # coerce: see op_degree
     for a in args[1:]:
-        acc = acc.lcm(decode_arg(a, R))
+        acc = acc.lcm(decode_into_ring(a, R))
     return enc_poly(acc)
 
 
@@ -514,7 +539,7 @@ def op_degree(req):
     # Coerce into R so a bare scalar (an {"int"} arg, or a ref/poly that reduced
     # to a constant — e.g. primpart returning 1) is a ring element with a working
     # .degree(x); a raw Sage Integer's .degree() takes no positional argument.
-    p = R(decode_arg(req["args"][0], R))
+    p = decode_into_ring(req["args"][0], R)
     # Maple: degree(0, ...) == -infinity (and Sage's univariate p.degree() on the
     # zero polynomial raises a bare NotImplementedError). DT computes
     # `p['Rank'] := degree(StandardForm(p), Leader(p))` and tests `degree(...) >= 0`,
@@ -556,7 +581,7 @@ def op_ldegree(req):
     R = make_ring(req["vars"])
     # Coerce into R (see op_degree): a bare scalar must be a ring element so its
     # low-degree methods work.
-    p = R(decode_arg(req["args"][0], R))
+    p = decode_into_ring(req["args"][0], R)
     # Maple: the identically-zero polynomial has ldegree +infinity (degree
     # -infinity). DT compares ldegree only via >= so a sentinel would do, but
     # match Maple exactly.
@@ -589,7 +614,10 @@ def op_ldegree(req):
 def op_coeff(req):
     """coeff(p, x, n) -> coefficient of x^n."""
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    # Coerce into R so a constant operand (a bare {"int"} arg, or a ref/poly that
+    # reduced to a scalar) is a ring element with the polynomial methods below;
+    # a raw Sage Integer has no .parent().ngens()/.coefficient(). (See op_degree.)
+    p = decode_into_ring(req["args"][0], R)
     x = decode_arg(req["args"][1], R)
     a2 = req["args"][2] if len(req["args"]) >= 3 else {"int": "1"}
     n = int(a2.get("int", a2.get("poly", "1")))
@@ -627,7 +655,7 @@ def op_lcoeff(req):
     nested-lexicographic leading coefficient:
     lcoeff(p, [x1,...,xn]) = lcoeff(...lcoeff(p, x1)..., xn)."""
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if p == 0:
         return enc_int(0)
     if len(req["args"]) >= 2:
@@ -653,7 +681,7 @@ def op_tcoeff(req):
     tcoeff(x^2+x, x) = 1, tcoeff(3x^3+5x^2, x) = 5. Without x, the trailing
     coefficient w.r.t. all indeterminates."""
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if p == 0:
         return enc_int(0)
     if len(req["args"]) >= 2:
@@ -683,7 +711,7 @@ def op_coeffs(req):
 
     coeffs(-6x+3y+23x^2-4xyz+7z^2, x) -> {23, -4yz-6, 7z^2+3y}."""
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if len(req["args"]) >= 2:
         Vnames = _vnames_arg(req["args"][1])
         gens = {str(g): i for i, g in enumerate(R.gens())}
@@ -743,8 +771,8 @@ def op_indets(req):
 def op_divide(req):
     """divide(a,b) -> exact division check; returns {bool, quotient}."""
     R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
+    a = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
+    b = decode_into_ring(req["args"][1], R)
     q, r = a.quo_rem(b)
     exact = (r == 0)
     return {"divide": {"exact": bool(exact), "quotient": str(q)}}
@@ -894,7 +922,7 @@ def _vnames_arg(a):
 
 def op_primpart(req):
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if p == 0:
         return enc_int(0)
     # primpart(p, V) = p / content(p, V). Like content, the two-arg form must
@@ -953,7 +981,7 @@ def _content_wrt(p, Vnames):
 
 def op_content(req):
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if p == 0:
         return enc_int(0)
     if len(req["args"]) < 2:
@@ -990,7 +1018,7 @@ def op_sqrfree(req):
     exact textual output, but the product reconstructs p and the factor
     multiplicities (the square-free structure) match."""
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
     if len(req["args"]) >= 2:
         Vnames = _vnames_arg(req["args"][1])
         gens = {str(g): g for g in R.gens()}
@@ -1020,8 +1048,8 @@ def op_sqrfree(req):
 
 def op_resultant(req):
     R = make_ring(req["vars"])
-    a = decode_arg(req["args"][0], R)
-    b = decode_arg(req["args"][1], R)
+    a = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
+    b = decode_into_ring(req["args"][1], R)
     x = decode_arg(req["args"][2], R) if len(req["args"]) >= 3 else None
     if x is not None:
         return enc_poly(a.resultant(b, x))
@@ -1073,7 +1101,7 @@ def op_diff(req):
     # PartialDerivativeInternal calls diff on constant terms once the structural
     # type(p,`+`)/`*`/`^` checks branch correctly (e.g. diff(-1, y) for the unit
     # factor of a -u[1,0] term).
-    f = R(decode_arg(req["args"][0], R))
+    f = decode_into_ring(req["args"][0], R)
     for xarg in xargs:
         f = f.derivative(decode_arg(xarg, R))
     return enc_poly(f)
