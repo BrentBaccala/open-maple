@@ -53,6 +53,22 @@ func (it *Interp) LoadDifferentialThomas(srcDir string) error {
 	if _, err := it.Exec("`DifferentialThomas/initialized` <> 'true' and `DifferentialThomas/init`():"); err != nil {
 		return fmt.Errorf("DifferentialThomas/init: %w", err)
 	}
+	// Real Maple's public Equations/Inequations return the system's
+	// (in)equations in DIFF notation -- diff(Ps(x,y,z),x) = ... and ... <> 0 --
+	// via the package's own JetList2Diff conversion, NOT the raw jet-form
+	// DifferentialSystem* accessors (which yield Ps[1,0,0]).  Define faithful
+	// wrappers so open-maple's output matches Maple and feeds thomas_cells.py /
+	// joca-thomas.sage with no conversion step.
+	const dtEqWrappers = "" +
+		"`DifferentialThomas/Equations` := proc(S) " +
+		"map(a -> a = 0, `DifferentialThomas/JetList2Diff`(" +
+		"`DifferentialThomas/DifferentialSystemEquations`(S), S['Ranking'])) end: " +
+		"`DifferentialThomas/Inequations` := proc(S) " +
+		"map(a -> a <> 0, `DifferentialThomas/JetList2Diff`(" +
+		"`DifferentialThomas/DifferentialSystemInequations`(S), S['Ranking'])) end:"
+	if _, err := it.Exec(dtEqWrappers); err != nil {
+		return fmt.Errorf("DifferentialThomas Equations/Inequations wrappers: %w", err)
+	}
 	it.registerDTPublicAPI()
 	return nil
 }
@@ -66,8 +82,8 @@ var dtPublicAPI = map[string]string{
 	"Ranking":                         "DifferentialThomas/ComputeRanking",
 	"ThomasDecomposition":             "DifferentialThomas/DifferentialThomasDecomposition",
 	"DifferentialThomasDecomposition": "DifferentialThomas/DifferentialThomasDecomposition",
-	"Equations":                       "DifferentialThomas/DifferentialSystemEquations",
-	"Inequations":                     "DifferentialThomas/DifferentialSystemInequations",
+	"Equations":                       "DifferentialThomas/Equations",
+	"Inequations":                     "DifferentialThomas/Inequations",
 }
 
 // registerDTPublicAPI binds the public DifferentialThomas API names to their
