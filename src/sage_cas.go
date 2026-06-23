@@ -961,7 +961,12 @@ func printSanPrec(v Value, parent int, s *sanitizer) string {
 	case *Prod:
 		return wrap(printSanProd(n, s), precProd, parent)
 	case *Power:
-		return wrap(printSanPrec(n.Base, precPow, s)+"^"+printSanPrec(n.Exp, precUnary, s), precPow, parent)
+		// `^` is RIGHT-associative in Sage/Python, so a base that is itself a
+		// Power (or any composite at <= precPow) MUST be parenthesized: the
+		// reciprocal (a^2)^-1 serialized bare as a^2^-1 re-parses in Sage as
+		// a^(2^-1) = sqrt(a), which then errors "not a 2nd power".  Render the
+		// base at precPow+1 so an inner Power gets wrapped.
+		return wrap(printSanPrec(n.Base, precPow+1, s)+"^"+printSanPrec(n.Exp, precUnary, s), precPow, parent)
 	case List:
 		parts := make([]string, len(n.Items))
 		for i, it := range n.Items {

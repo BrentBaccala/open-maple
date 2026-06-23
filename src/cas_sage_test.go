@@ -158,3 +158,17 @@ func TestSageMatrixLA(t *testing.T) {
 		t.Errorf("Rank([[1,2],[2,4]]) = %q, want 1", got)
 	}
 }
+
+// TestSagePowerBaseParenthesized is a regression test (no Sage needed): `^` is
+// right-associative in Sage/Python, so the base of a power that is itself a
+// power MUST be parenthesized when serialized to a poly string. (a^2)^-1
+// rendered bare as a^2^-1 re-parses in Sage as a^(2^-1) = sqrt(a) and errors
+// "not a 2nd power" -- the crash the combined hydrogen decomposition hit.
+func TestSagePowerBaseParenthesized(t *testing.T) {
+	san := newSanitizer()
+	v := &Power{Base: &Power{Base: Name{"a"}, Exp: newInt(2)}, Exp: newInt(-1)}
+	if got := printSanitized(v, san); got != "(a^2)^-1" {
+		t.Errorf("printSanitized((a^2)^-1) = %q, want (a^2)^-1 "+
+			"(bare a^2^-1 re-parses as sqrt(a))", got)
+	}
+}
