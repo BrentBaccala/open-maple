@@ -511,7 +511,10 @@ def op_denom(req):
 
 def op_degree(req):
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    # Coerce into R so a bare scalar (an {"int"} arg, or a ref/poly that reduced
+    # to a constant — e.g. primpart returning 1) is a ring element with a working
+    # .degree(x); a raw Sage Integer's .degree() takes no positional argument.
+    p = R(decode_arg(req["args"][0], R))
     # Maple: degree(0, ...) == -infinity (and Sage's univariate p.degree() on the
     # zero polynomial raises a bare NotImplementedError). DT computes
     # `p['Rank'] := degree(StandardForm(p), Leader(p))` and tests `degree(...) >= 0`,
@@ -551,7 +554,9 @@ def op_degree(req):
 
 def op_ldegree(req):
     R = make_ring(req["vars"])
-    p = decode_arg(req["args"][0], R)
+    # Coerce into R (see op_degree): a bare scalar must be a ring element so its
+    # low-degree methods work.
+    p = R(decode_arg(req["args"][0], R))
     # Maple: the identically-zero polynomial has ldegree +infinity (degree
     # -infinity). DT compares ldegree only via >= so a sentinel would do, but
     # match Maple exactly.
