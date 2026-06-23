@@ -91,12 +91,101 @@ def ring_namespace(R):
     return ns
 
 
+# ---------------------------------------------------------------------------
+# Flat-sum AST rebalancing
+#
+# Some DT ops (notably evala/simplify on the combined hydrogen system, which
+# runs with no end reduction) hand us fully expanded expressions whose
+# numerators are flat sums of tens of thousands of monomials. sage_eval parses
+# via Python's compile(), and a flat sum  t1 + t2 + ... + tN  compiles to an
+# N-deep left-associated AST. CPython's constant-folder astfold_expr
+# (Python/ast_opt.c) then recurses once per additive term *on the C stack*. On
+# Sage's Python 3.11 there is no C-recursion guard (setrecursionlimit does NOT
+# gate this path), so beyond ~47k terms the 8 MB main-thread stack overflows and
+# the process SIGSEGVs — surfacing as cysignals' misleading "compiled module ...
+# not wrapped with sig_on/sig_off" banner.
+#
+# Fix: rewrite the string so long flat sums become *balanced* binary trees
+# (AST depth O(log N) ~ 16 for 60k terms instead of O(N)), recursing into
+# parenthesised subexpressions. This is pure string restructuring — sage_eval
+# still does all the algebra, and the reassociation is exact over QQ.
+# ---------------------------------------------------------------------------
+
+def _split_top_additive(s):
+    """Split s into signed additive terms at paren-depth 0.
+
+    A '+'/'-' is an additive operator only when it is not unary, i.e. the
+    previous significant char is not one of  ( ^ * / + -  (this keeps exponent
+    signs like x^-1 and leading unary signs attached to their term)."""
+    terms = []
+    depth = 0
+    start = 0
+    prev = ''  # previous non-space significant char
+    for i, c in enumerate(s):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c in '+-' and depth == 0 and prev not in ('', '(', '^', '*', '/', '+', '-'):
+            terms.append(s[start:i])
+            start = i
+        if not c.isspace():
+            prev = c
+    terms.append(s[start:])
+    return [t.strip() for t in terms if t.strip()]
+
+
+def _rebalance_parens(term):
+    """Recursively rebalance the contents of every top-level (...) group inside
+    a single term (a term has no top-level additive operators of its own)."""
+    out = []
+    i = 0
+    n = len(term)
+    while i < n:
+        c = term[i]
+        if c == '(':
+            depth = 1
+            j = i + 1
+            while j < n and depth:
+                if term[j] == '(':
+                    depth += 1
+                elif term[j] == ')':
+                    depth -= 1
+                j += 1
+            inner = term[i + 1:j - 1]
+            out.append('(' + rebalance(inner) + ')')
+            i = j
+        else:
+            out.append(c)
+            i += 1
+    return ''.join(out)
+
+
+def _balanced_join(terms):
+    """Join signed term-strings into a balanced binary '+' tree string."""
+    if len(terms) == 1:
+        return '(' + terms[0] + ')'
+    mid = len(terms) // 2
+    return '(' + _balanced_join(terms[:mid]) + '+' + _balanced_join(terms[mid:]) + ')'
+
+
+def rebalance(s):
+    """Rewrite an expression string so long flat sums become balanced binary
+    trees, recursing into parenthesised subexpressions. Keeps the AST depth
+    handed to compile() at O(log N), avoiding the astfold_expr C-stack overflow
+    on huge expanded polynomials."""
+    terms = [_rebalance_parens(t) for t in _split_top_additive(s)]
+    return _balanced_join(terms)
+
+
 def parse_in_ring(s, R):
     """Parse a Maple/Sage-form expression string into an element of ring R."""
     ns = ring_namespace(R)
-    # sage_eval parses arithmetic expressions using the provided locals.
+    # sage_eval parses arithmetic expressions using the provided locals. Big
+    # flat sums are rebalanced first so compile() never recurses N-deep (see the
+    # _split_top_additive / rebalance block above).
     from sage.misc.sage_eval import sage_eval
-    return R(sage_eval(s, locals=ns))
+    return R(sage_eval(rebalance(s), locals=ns))
 
 
 def parse_symbolic(s, varnames):
@@ -120,7 +209,7 @@ def parse_symbolic(s, varnames):
         if nm in ns or hasattr(_sa, nm):
             continue
         ns[nm] = function(nm)
-    return SR(sage_eval(s, locals=ns))
+    return SR(sage_eval(rebalance(s), locals=ns))
 
 
 # ---------------------------------------------------------------------------
@@ -936,15 +1025,15 @@ def main():
 if __name__ == "__main__":
     # Some DT ops hand us very large *flat* expressions — a fully expanded
     # polynomial with thousands of '+'-joined terms (e.g. the hydrogen ansatz's
-    # constancy/Vf substitutions). Sage's string parsing routes through Python's
-    # sage_eval -> compile(), and CPython's bytecode compiler recurses once per
-    # AST node, overflowing the default 1000-deep limit ("maximum recursion depth
-    # exceeded during compilation") on such a sum. Raise the recursion limit so
-    # those parses succeed. We must stay on the main thread (Sage's cysignals
-    # SIGSEGV/SIGINT handling segfaults off-thread), so we cannot enlarge the C
-    # stack; this limit is chosen to clear the expressions seen here while
-    # staying well short of a C-stack overflow. Native-Go handling of the cheap
-    # ops (incl. evala) avoids most of these round-trips entirely; this is the
-    # backstop for ops that genuinely need Sage on a big expression.
+    # constancy/Vf substitutions, or the combined system's no-end-reduction
+    # evala). Sage's string parsing routes through sage_eval -> compile(), whose
+    # constant-folder astfold_expr recurses once per additive AST node *on the C
+    # stack*. On Python 3.11 setrecursionlimit does NOT gate that path, so a flat
+    # sum past ~47k terms overflows the 8 MB main-thread stack and SIGSEGVs
+    # (cysignals then mislabels it as a sig_on/sig_off bug). The real fix is the
+    # rebalance() pass in parse_in_ring/parse_symbolic, which keeps the compiled
+    # AST O(log N) deep. The raised recursion limit below only covers ordinary
+    # deep Python recursion elsewhere in Sage; it is not what makes the big
+    # polynomial parses safe.
     sys.setrecursionlimit(100000)
     main()
