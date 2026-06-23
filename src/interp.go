@@ -130,6 +130,58 @@ func (it *Interp) Exec(code string) (Value, error) {
 	return it.execBlock(root.nodes)
 }
 
+// ExecProgram runs a top-level program statement by statement, dropping the CAS
+// expression-handle cache between top-level statements so the no-eviction cache
+// cannot grow without bound across a long run (e.g. the combined hydrogen run).
+//
+// This is the chosen "clear escape hatch" seam: there is no Go-visible per-cell
+// boundary inside DT's decomposition (the cells are produced by the LGPL Maple
+// source running through the interpreter), so we clear at the coarsest safe
+// boundary — the end of each top-level statement, which is where one
+// decomposition / save / print closes out before the next begins. Before each
+// clear we DEEP-MATERIALIZE every SageRef still reachable from the globals and
+// the ditto history, so any handle that survives the statement already holds its
+// concrete value in Go and clearing the server-side cache cannot strand it.
+func (it *Interp) ExecProgram(code string) (Value, error) {
+	root, err := frontEnd(code)
+	if err != nil {
+		return nil, err
+	}
+	cc, _ := it.cas.(cacheClearer)
+	var last Value = NULL()
+	for _, s := range root.nodes {
+		v, err := it.eval(s)
+		if err != nil {
+			return last, err
+		}
+		last = v
+		it.pushHistory(v)
+		if cc != nil {
+			it.materializeLiveRefs()
+			if cerr := cc.ClearCache(); cerr != nil {
+				return last, cerr
+			}
+		}
+	}
+	return last, nil
+}
+
+// materializeLiveRefs forces every SageRef reachable from the surviving
+// interpreter state (globals + ditto history) to its concrete value, so a
+// subsequent ClearCache cannot strand a still-referenced handle. Materialization
+// is idempotent (sync.Once) and cached on each ref.
+func (it *Interp) materializeLiveRefs() {
+	seen := map[Value]bool{}
+	for _, v := range it.globals {
+		materializeDeep(v, seen)
+	}
+	for _, v := range it.history {
+		if v != nil {
+			materializeDeep(v, seen)
+		}
+	}
+}
+
 // execBlock runs a sequence of statements, returning the last value.
 func (it *Interp) execBlock(stmts []*tree) (Value, error) {
 	var last Value = NULL()

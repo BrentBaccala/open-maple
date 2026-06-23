@@ -30,6 +30,9 @@ const (
 
 func printPrec(v Value, parent int) string {
 	switch n := v.(type) {
+	case *SageRef:
+		// Printing needs the concrete expression: materialize (once) and recurse.
+		return printPrec(concrete(n), parent)
 	case Integer:
 		return n.Val.String()
 	case Rational:
@@ -278,6 +281,10 @@ func typeOrder(v Value) int {
 // compareValues defines a total order used for set canonicalisation and as the
 // default term comparator for sort(). Returns -1, 0, +1.
 func compareValues(a, b Value) int {
+	// A ref-backed value must be materialized before any structural comparison —
+	// equality/membership/sort all look inside the expression.
+	a = concrete(a)
+	b = concrete(b)
 	// Polynomial-aware comparison: when at least one side is a compound
 	// polynomial (Sum/Prod/Power) and BOTH sides are plain polynomial
 	// expressions, compare by expanded normal form. This makes polynomial

@@ -19,19 +19,39 @@
 #                 {"matrix": [[...],[...]]}  — rows of poly strings
 #                 {"vector": [...]}          — entries (poly strings)
 #                 {"raw": <json>}   — a literal JSON scalar (int/str/bool)
+#                 {"ref": <int>}    — an opaque handle to a cached Sage object
+#                       (see "CAS expression handles" below)
 #       frac  : if true, build over Frac(PolynomialRing) (for normal/numer/denom)
+#       want_ref : if true, poly/rational results are cached Sage-side and
+#                  returned as {"ref": N} instead of {"poly": str} (optimization)
 #
 #   response: {"id": <int>, "ok": true,  "result": <result>}
 #         or  {"id": <int>, "ok": false, "error": "<message>"}
 #
 #   <result> shapes:
 #       {"poly": "x^2 + 1"}                       — a single expression string
+#       {"ref": 42}                               — an opaque handle to a poly /
+#             rational result kept Sage-side (see "CAS expression handles" below)
 #       {"int": "5"}                              — an exact integer
 #       {"bool": true}
 #       {"list": [<result>, ...]}                 — ordered list
 #       {"factors": {"unit": "<str>",
 #                    "factors": [["<facstr>", <mult:int>], ...]}}
 #       {"matrix": [[...],[...]]} / {"vector":[...]}
+#
+# CAS expression handles (refs) — an OPTIONAL optimization on top of the string
+# protocol; correctness is identical with refs off.
+#   - Arg variant {"ref": N} is usable anywhere {"poly": ...} is. decode_arg
+#     resolves it from CACHE and coerces into the op's target ring (fast path
+#     R(obj); on failure, the existing string/rebalance path, logged as
+#     [ref-coerce-fallback]).
+#   - Poly / rational results are kept Sage-side and returned as {"ref": N} when
+#     the request carries "want_ref": true (the Go client sets this). The giant
+#     result string is then never serialized until the client asks for it.
+#   - op "materialize": {"op":"materialize","args":[{"ref":N}]} -> {"poly": str}.
+#   - op "clear": drops the whole cache, or only the listed ids
+#     ({"args":[{"ref":N},...]}). Returns {"ok": true}. The cache has NO
+#     automatic eviction; the Go client clears at decomposition-cell boundaries.
 #
 # All polynomial output strings are Sage's str() form, which is Maple-parseable
 # (x^2 + 2*x + 1, 1/2, ^/*/+ ); the Go side re-parses them with the existing
@@ -53,6 +73,78 @@ from sage.all import (
     gcd as sage_gcd, lcm as sage_lcm, binomial as sage_binomial,
     Integer as SageInteger,
 )
+
+
+# ---------------------------------------------------------------------------
+# CAS expression handles (refs)
+#
+# Large expressions (the combined hydrogen system reaches ~200 KB / ~47k terms)
+# are expensive to serialize and re-parse on every round-trip. The cache keeps a
+# poly/rational result Sage-side and hands the client an opaque integer handle;
+# a handle fed back as an op argument is resolved here without ever shipping the
+# string. This is purely an optimization — every ref has an equivalent string
+# form (materialize), and a ref arg degrades to the string path if it does not
+# fit the consuming op's ring.
+#
+# No automatic eviction: the cache grows until an explicit `clear` or process
+# exit, so a handle never goes stale within a live server. The Go client clears
+# at decomposition-cell boundaries to bound memory.
+# ---------------------------------------------------------------------------
+
+CACHE = {}            # int id -> cached Sage object
+_NEXT_REF = [1]       # monotonically increasing id counter (list for closure-free mutation)
+
+# [ref-coerce-fallback] accounting: how often R(obj) failed and we fell back to
+# the string path, broken down by op. Printed at clear time and at exit so we
+# learn which ring regimes refs do not cleanly fit.
+_COERCE_FALLBACKS = {}     # op-name -> count
+_COERCE_FALLBACK_TOTAL = [0]
+
+# Current op/member context, set by handle() before args are decoded, so the
+# coercion-fallback log line can name the op that triggered it.
+_CUR_OP = [""]
+_CUR_MEMBER = [""]
+
+
+def cache_put(obj):
+    """Store obj in the cache and return its new integer handle."""
+    rid = _NEXT_REF[0]
+    _NEXT_REF[0] += 1
+    CACHE[rid] = obj
+    return rid
+
+
+def cache_get(rid):
+    """Resolve a handle to its cached object. A missing handle is a HARD ERROR
+    (a bug or an unexpected server restart, not something to paper over)."""
+    try:
+        return CACHE[rid]
+    except KeyError:
+        raise KeyError("unknown expression ref: %r (cache has %d entries)"
+                       % (rid, len(CACHE)))
+
+
+def _log_coerce_fallback(rid, obj, R, err):
+    """Emit a structured [ref-coerce-fallback] line to STDERR and tally it."""
+    op = _CUR_OP[0]
+    member = _CUR_MEMBER[0]
+    try:
+        frm = repr(obj.parent())
+    except Exception:
+        frm = type(obj).__name__
+    print("[ref-coerce-fallback] op=%s member=%s ref=%s from=%s to=%r err=%s"
+          % (op, member, rid, frm, R, err), file=sys.stderr)
+    _COERCE_FALLBACK_TOTAL[0] += 1
+    _COERCE_FALLBACKS[op] = _COERCE_FALLBACKS.get(op, 0) + 1
+
+
+def _coerce_fallback_summary():
+    """One-line summary of the coercion fallbacks seen so far."""
+    if _COERCE_FALLBACK_TOTAL[0] == 0:
+        return "[ref-coerce-fallback] total=0"
+    by = ", ".join("%s:%d" % (k, v)
+                   for k, v in sorted(_COERCE_FALLBACKS.items()))
+    return "[ref-coerce-fallback] total=%d by-op=%s" % (_COERCE_FALLBACK_TOTAL[0], by)
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +333,44 @@ def parse_symbolic(s, varnames):
 # Argument decoding
 # ---------------------------------------------------------------------------
 
+def coerce_into_ring(rid, obj, R):
+    """Coerce a cached object into the op's target ring R.
+
+    Fast path: R(obj). On any coercion failure, fall back to the exact string /
+    rebalance path used for {"poly": ...} args (parse_in_ring(str(obj), R)) and
+    log a [ref-coerce-fallback] line. This keeps a ref correct across every ring
+    regime: if the cached object does not fit the consuming op's ring, we degrade
+    to exactly today's string behavior, never to a wrong answer."""
+    try:
+        return R(obj)
+    except Exception as err:
+        _log_coerce_fallback(rid, obj, R, err)
+        return parse_in_ring(str(obj), R)
+
+
+def arg_poly_str(a):
+    """Return the expression-string form of a poly/name/int/ref arg. Materializes
+    a cached ref to its str(). Used by the SR / symbolic fallback paths (expand,
+    simplify, diff, indets) that parse the operand string directly rather than
+    through a ring."""
+    if "poly" in a:
+        return a["poly"]
+    if "ref" in a:
+        return str(cache_get(a["ref"]))
+    if "name" in a:
+        return a["name"]
+    if "int" in a:
+        return a["int"]
+    raise ValueError("cannot stringify arg: %r" % (a,))
+
+
 def decode_arg(a, R):
     """Decode one request arg into a ring element (or python scalar)."""
     if "poly" in a:
         return parse_in_ring(a["poly"], R)
+    if "ref" in a:
+        rid = a["ref"]
+        return coerce_into_ring(rid, cache_get(rid), R)
     if "int" in a:
         return ZZ(int(a["int"]))
     if "name" in a:
@@ -274,7 +400,33 @@ def decode_vector(a, R):
 # Result encoding
 # ---------------------------------------------------------------------------
 
+# Set by handle() from the request's "want_ref" field. When true, enc_poly
+# caches the object Sage-side and returns a {"ref": N} handle instead of the
+# (potentially huge) string. Reset to False for every request so refs are
+# strictly opt-in per call.
+_WANT_REF = [False]
+
+
+def _is_symbolic_ring_elt(p):
+    """True if p lives in Sage's symbolic ring SR. SR results come from the
+    diff/expand/simplify fallback paths and carry unevaluated function
+    applications (diff(a(x), x), cos(phi)) whose str() is NOT a clean polynomial
+    in sanitized variables — caching them as refs would let an unsanitized
+    function head (a[0], a(x)) flow back to a later op and break parsing. So SR
+    results are always returned as strings, never refs."""
+    try:
+        return p.parent() is SR
+    except Exception:
+        return False
+
+
 def enc_poly(p):
+    """Encode a single poly/rational result. Returns a {"ref": N} handle when the
+    request asked for one (want_ref) AND the result is a genuine polynomial /
+    rational ring element; SR (symbolic) results are always returned as strings
+    (see _is_symbolic_ring_elt)."""
+    if _WANT_REF[0] and not _is_symbolic_ring_elt(p):
+        return {"ref": cache_put(p)}
     return {"poly": str(p)}
 
 
@@ -333,7 +485,7 @@ def op_expand(req):
         p = decode_arg(req["args"][0], R)
         return enc_poly(p)  # ring elements are already expanded
     except Exception:
-        e = parse_symbolic(req["args"][0]["poly"], req["vars"])
+        e = parse_symbolic(arg_poly_str(req["args"][0]), req["vars"])
         return enc_poly(e.expand())
 
 
@@ -568,6 +720,15 @@ def op_indets(req):
     if "exprlist" in a:
         for s in a["exprlist"]:
             vs |= vars_of(s)
+    elif "ref" in a:
+        # A cached object already lives in a ring: read its variables directly.
+        obj = cache_get(a["ref"])
+        try:
+            vs = set(obj.variables())
+        except AttributeError:
+            vs = set()
+        except Exception:
+            vs = vars_of(str(obj))
     else:
         s = a.get("poly", a.get("name", a.get("int", "")))
         vs = vars_of(str(s))
@@ -885,7 +1046,13 @@ def op_diff(req):
     order, rendering u[2,0] as diff(u(x,t), x). Handles polynomial and symbolic
     (cos(phi[0]), unknown function u(x,t), ...) operands.
     """
-    fstr = req["args"][0].get("poly", req["args"][0].get("name", ""))
+    a0 = req["args"][0]
+    fstr = a0.get("poly", a0.get("name", ""))
+    if not fstr and "ref" in a0:
+        # A cached object is always a polynomial/rational ring element (enc_poly
+        # never caches a symbolic SR expression), so its str() is poly-form and
+        # _looks_symbolic will (correctly) route it to the polynomial path below.
+        fstr = str(cache_get(a0["ref"]))
     xargs = req["args"][1:]
 
     if _looks_symbolic(fstr, req["vars"]):
@@ -913,7 +1080,7 @@ def op_simplify(req):
         f = decode_arg(req["args"][0], R)
         return enc_poly(f)
     except Exception:
-        e = parse_symbolic(req["args"][0]["poly"], req["vars"])
+        e = parse_symbolic(arg_poly_str(req["args"][0]), req["vars"])
         return enc_poly(e.simplify_full())
 
 
@@ -972,6 +1139,32 @@ def op_la(req):
 
 # --- deferred --------------------------------------------------------------
 
+def op_materialize(req):
+    """materialize({"ref":N}) -> {"poly": str}. Forces a cached object to its
+    string form. A want_ref on this op is ignored — materialize always returns a
+    string (that is its entire purpose)."""
+    a = req["args"][0]
+    if "ref" not in a:
+        raise ValueError("materialize requires a {\"ref\":N} arg, got %r" % (a,))
+    rid = a["ref"]
+    return {"poly": str(cache_get(rid))}
+
+
+def op_clear(req):
+    """clear() drops the ENTIRE cache; clear({"ref":N},...) drops only those ids.
+    Returns {"ok": true}. Also logs the running coercion-fallback summary so a run
+    log shows the ref-coerce health at each cell boundary."""
+    args = req.get("args") or []
+    if not args:
+        CACHE.clear()
+    else:
+        for a in args:
+            if "ref" in a:
+                CACHE.pop(a["ref"], None)
+    print(_coerce_fallback_summary(), file=sys.stderr)
+    return {"ok": True}
+
+
 def op_deferred(req):
     raise ValueError(
         "not yet implemented (Phase 3 deferred): %s" % req["op"])
@@ -1012,6 +1205,9 @@ OPS = {
     # explicitly deferred tower-RootOf path
     "AFactors": op_deferred,
     "evala": op_simplify,
+    # CAS expression handles
+    "materialize": op_materialize,
+    "clear": op_clear,
 }
 
 
@@ -1020,11 +1216,29 @@ def handle(req):
     fn = OPS.get(op)
     if fn is None:
         raise ValueError("unknown op: %s" % op)
-    return fn(req)
+    # Op context for the [ref-coerce-fallback] log lines emitted during arg
+    # decoding, and the per-request want_ref flag consumed by enc_poly.
+    # materialize/clear never return a ref themselves.
+    _CUR_OP[0] = op
+    _CUR_MEMBER[0] = req.get("member", "") or ""
+    _WANT_REF[0] = bool(req.get("want_ref")) and op not in ("materialize", "clear")
+    try:
+        return fn(req)
+    finally:
+        _WANT_REF[0] = False
 
 
 def main():
     out = sys.stdout
+    try:
+        _main_loop(out)
+    finally:
+        # Final coercion-fallback tally so the run log shows which ring regimes
+        # refs did not cleanly fit, even when the client never sent a clear.
+        print(_coerce_fallback_summary(), file=sys.stderr)
+
+
+def _main_loop(out):
     for line in sys.stdin:
         line = line.strip()
         if not line:

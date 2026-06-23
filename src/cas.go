@@ -10,6 +10,15 @@ type CAS interface {
 	Call(op string, args []Value) (Value, error)
 }
 
+// cacheClearer is implemented by a CAS backend that keeps an expression-handle
+// cache (the Sage backend). The interpreter driver calls ClearCache at coarse
+// boundaries (between top-level decomposition statements) so the no-eviction
+// ref cache cannot grow without bound on a long run. Backends without a cache
+// don't implement it and the clear is simply skipped.
+type cacheClearer interface {
+	ClearCache() error
+}
+
 // errCASUnimplemented is the explicit signal that a computer-algebra op was
 // reached but the backend is a stub.
 type errCASUnimplemented struct{ Op string }

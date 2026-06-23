@@ -158,6 +158,85 @@ The hydrogen worksheet `save`s its 18-min result so it never recomputes. `save`,
 
 Pinned by `save_read_test.go`.
 
+## CAS expression handles (refs): cutting the string round-trips
+
+The Go↔Sage bridge was fully **stateless**: every request shipped the whole
+expression as a string (`{"poly": "<entire string>"}`), Sage re-parsed it,
+computed, and returned another full string that Go re-parsed. For the combined
+hydrogen system (no end reduction) those strings reach ~200 KB / ~47k terms —
+the direct cause of the astfold_expr C-stack SIGSEGV (commits d31b89e, 9e54eed).
+
+**Refs** are an optimization layered on top of the string protocol (correctness
+identical with refs off — disable via `OPENMAPLE_DISABLE_REFS=1`, a bisection
+switch like `OPENMAPLE_DISABLE_NATIVE`):
+
+- A poly/rational result is kept Sage-side in a cache and returned as an opaque
+  `{"ref": N}` handle (the Go client sets `want_ref` on every request). The
+  giant result string is materialized only on demand.
+- A handle fed back as an op argument is sent as `{"ref": N}` and resolved from
+  the cache — the string never crosses the wire. So a chain of Sage→Sage ops
+  (arithmetic/simplify/factor flowing into each other) avoids serialize+parse on
+  both ends.
+- **Lazy materialization** (Go side, `SageRef` in `sage_cas.go`): any Go code
+  that must look inside the expression — printing, equality/`compareValues`,
+  `op`/`nops`/`whattype`/`type`, `subs`/`map`, arithmetic, `save`, the native
+  poly layer — calls `concrete()`, which does a single `materialize` round-trip
+  and caches the result on the ref (fetched at most once). DT inspects structure
+  frequently, so the win is concentrated in the arithmetic/simplify chains that
+  flow Sage→Sage without Go peeking; that is expected and fine.
+- **SR results are never refs.** The diff/expand/simplify symbolic-ring fallback
+  paths return strings, because an SR expression's str() carries unsanitized
+  function heads (`diff(a(x), x)`, `cos(phi)`) that would break sanitization if
+  cached and fed back. Only genuine polynomial/rational ring elements become
+  refs (`enc_poly` / `_is_symbolic_ring_elt` in `sage_server.py`).
+
+**Where `clear` is emitted.** The cache has **no automatic eviction**, so it
+must be dropped at a coarse boundary. There is no Go-visible per-cell seam inside
+DT's decomposition (the cells are produced by the LGPL Maple source running
+through the interpreter), so the clear fires at the **end of each top-level
+program statement** (`Interp.ExecProgram` in `interp.go`, used by `runFile`).
+Before each clear, every `SageRef` still reachable from the globals and the ditto
+history is **deep-materialized** (`materializeLiveRefs`/`materializeDeep`), so a
+handle that survives the statement already holds its concrete value in Go and
+clearing the server-side cache can never strand it. (A subsequent `encodeArg` of
+an already-materialized ref sends its string, not the now-stale handle.)
+
+**Reading the logs.**
+- `[ref-coerce-fallback] op=… ref=N from=<parent ring> to=<target ring> err=…`
+  (stderr): a ref's fast-path `R(obj)` coercion into the consuming op's ring
+  failed and we fell back to the string/rebalance path. Sage's by-name coercion
+  turns out to be very robust, so in practice this rarely fires — refs fit every
+  ring regime tried (poly↔frac, subset/superset vars, Frac-coefficient rings).
+  A `[ref-coerce-fallback] total=N by-op=…` summary prints at each `clear` and at
+  process exit.
+- `[ref-stats] issued=… materialized=… ref-args=… poly-args=…` (stderr, end of
+  each `openmaple` program): how many result handles were issued vs how many had
+  to be materialized, and the `{"ref"}` vs `{"poly"}` arg split on the wire — the
+  measure of how much string traffic refs removed.
+
+**Tests.** `cas/test_refs.py` (run under `sage -python`) covers ref round-trip,
+cross-ring consumption, the coercion fallback path, clear (whole + by-id), and
+the unknown-ref hard error. The Go side is covered by the full sage-gated suite
+(green with refs on) and the example-suite runner below.
+
+## Example-suite regression runner
+
+`tests/run_examples.sh` is the canonical regression suite for the
+`~/thomas-experiments` examples (there is no formal Go test for the full
+end-to-end decompositions). It runs each example through `openmaple` on the Sage
+backend, asserts the expected simple-system count, prints per-example PASS/FAIL +
+a summary, exits nonzero on any failure, and streams to a log (each example via
+`tee` so the task-runner stream watchdog stays alive during ex4's ~30 min run):
+
+```
+tests/run_examples.sh            # ex1b smoke + ex1..ex4 (ex4 ~30+ min)
+tests/run_examples.sh --quick    # ex1b + ex1..ex3 only (skip ex4)
+tests/run_examples.sh --log FILE # stream to FILE (default: $TASK_LIVE_LOG or temp)
+```
+
+Expected: ex1_singular_ode → 2, ex2_params → 3 labeled parts, ex3_ode1d → 13,
+ex4_hydrogen → 29. ex1b_discover is a typing/accessor probe (smoke run, no count).
+
 ## Remaining frontiers (characterized, none a clear quick win)
 
 1. **High-order / large systems are interpreter-CPU-bound, not CAS-bound.** Now

@@ -40,17 +40,31 @@ type SageBackend struct {
 	script  string
 	timeout time.Duration
 	dead    bool
+	// useRefs enables the expression-handle optimization: poly/rational results
+	// are kept Sage-side and returned as {"ref":N} handles, materialized to a
+	// string only when the Go side must look inside. On by default; disable with
+	// OPENMAPLE_DISABLE_REFS=1 to fall back to the pure-string protocol (identical
+	// correctness — a bisection switch like OPENMAPLE_DISABLE_NATIVE).
+	useRefs bool
+	// ref-traffic counters (OPENMAPLE_SAGE_TRACE / measurement): how many result
+	// handles were issued vs materialized, and how many {"ref"} vs {"poly"} args
+	// were sent. Read by the example-suite runner via the trailing summary.
+	refsIssued      int
+	refsMaterialized int
+	refArgsSent     int
+	polyArgsSent    int
 }
 
 // sageRequest / sageResponse are the wire types.
 type sageRequest struct {
-	ID     int               `json:"id"`
-	Op     string            `json:"op"`
-	Member string            `json:"member,omitempty"`
-	Vars   []string          `json:"vars"`
-	Args   []json.RawMessage `json:"args"`
-	Frac   bool              `json:"frac,omitempty"`
-	Debug  bool              `json:"debug,omitempty"`
+	ID      int               `json:"id"`
+	Op      string            `json:"op"`
+	Member  string            `json:"member,omitempty"`
+	Vars    []string          `json:"vars"`
+	Args    []json.RawMessage `json:"args"`
+	Frac    bool              `json:"frac,omitempty"`
+	Debug   bool              `json:"debug,omitempty"`
+	WantRef bool              `json:"want_ref,omitempty"`
 }
 
 type sageResponse struct {
@@ -58,6 +72,171 @@ type sageResponse struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result"`
 	Error  string          `json:"error"`
+}
+
+// SageRef is a Value that stands in for a poly/rational expression kept Sage-side
+// behind an opaque integer handle. It is produced by decodeResult when a result
+// arrives as {"ref":N} and lets a chain of Sage→Sage ops flow without ever
+// serializing the (possibly ~200 KB) expression string into Go.
+//
+// Lazy materialization: any Go code that must inspect the concrete expression
+// (printing, equality/comparison, op/nops/whattype, the native polynomial layer,
+// arithmetic, save) calls materialize(), which does a single `materialize`
+// round-trip and caches the result on the ref — so the string is fetched at most
+// once. When a SageRef is passed BACK as an operand to another Sage op,
+// encodeArg emits {"ref":N} and no materialization occurs.
+type SageRef struct {
+	be  *SageBackend
+	id  int
+	san *sanitizer // the sanitizer in effect when the ref was created (for parseBack)
+
+	once sync.Once
+	val  Value // cached materialized value (set on first materialize)
+	err  error
+}
+
+func (*SageRef) isValue() {}
+
+// materialize fetches the concrete Value for this ref, at most once. After this
+// returns, ref.val holds the parsed expression in the original (unsanitized)
+// form, exactly as the string protocol would have produced.
+func (r *SageRef) materialize() (Value, error) {
+	r.once.Do(func() {
+		r.be.mu.Lock()
+		r.be.refsMaterialized++
+		r.be.mu.Unlock()
+		req := &sageRequest{
+			Op:   "materialize",
+			Args: []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"ref":%d}`, r.id))},
+		}
+		resp, err := r.be.roundtrip(req)
+		if err != nil {
+			r.err = err
+			return
+		}
+		if !resp.OK {
+			r.err = fmt.Errorf("sage materialize ref %d: %s", r.id, resp.Error)
+			return
+		}
+		v, err := r.be.decodeResult("materialize", resp.Result, r.san)
+		if err != nil {
+			r.err = err
+			return
+		}
+		r.val = v
+	})
+	return r.val, r.err
+}
+
+// materialized reports whether this ref has already been resolved to a concrete
+// value (and returns it). It does NOT trigger a round-trip — it only reads the
+// cached result, so it is safe to call after the server-side handle was cleared.
+func (r *SageRef) materialized() (Value, bool) {
+	if r.val != nil && r.err == nil {
+		return r.val, true
+	}
+	return nil, false
+}
+
+// concrete materializes v if it is a SageRef, otherwise returns it unchanged.
+// This is the single guard every interpreter inspection point calls before
+// looking inside a Value. A materialization error surfaces as a panic carrying a
+// maple error — server restart mid-run loses cache state, and an unknown-ref
+// materialize is a hard error per the protocol (not silently recoverable).
+func concrete(v Value) Value {
+	r, ok := v.(*SageRef)
+	if !ok {
+		return v
+	}
+	mv, err := r.materialize()
+	if err != nil {
+		panic(newMapleError("sage ref materialize failed: " + err.Error()))
+	}
+	return mv
+}
+
+// materializeDeep recursively forces every SageRef reachable from v to its
+// concrete value. Used before ClearCache so surviving handles are never
+// stranded. `seen` guards against cyclic/shared structures (Tables can be
+// shared). It mutates nothing structurally — a SageRef caches its own value — so
+// the same Value objects remain in place, now backed by materialized refs.
+func materializeDeep(v Value, seen map[Value]bool) {
+	switch n := v.(type) {
+	case *SageRef:
+		mv := concrete(n) // forces materialize (once)
+		materializeDeep(mv, seen)
+	case Seq:
+		for _, it := range n.Items {
+			materializeDeep(it, seen)
+		}
+	case List:
+		for _, it := range n.Items {
+			materializeDeep(it, seen)
+		}
+	case Set:
+		for _, it := range n.Items {
+			materializeDeep(it, seen)
+		}
+	case *Sum:
+		for _, t := range n.Terms {
+			materializeDeep(t, seen)
+		}
+	case *Prod:
+		for _, f := range n.Factors {
+			materializeDeep(f, seen)
+		}
+	case *Power:
+		materializeDeep(n.Base, seen)
+		materializeDeep(n.Exp, seen)
+	case *Func:
+		materializeDeep(n.Head, seen)
+		for _, a := range n.Args {
+			materializeDeep(a, seen)
+		}
+	case *Indexed:
+		materializeDeep(n.Head, seen)
+		for _, ix := range n.Idx {
+			materializeDeep(ix, seen)
+		}
+	case *Equation:
+		materializeDeep(n.Lhs, seen)
+		materializeDeep(n.Rhs, seen)
+	case *Relation:
+		materializeDeep(n.Lhs, seen)
+		materializeDeep(n.Rhs, seen)
+	case *Range:
+		materializeDeep(n.Lo, seen)
+		materializeDeep(n.Hi, seen)
+	case *Table:
+		if seen[v] {
+			return
+		}
+		seen[v] = true
+		for _, val := range n.Vals {
+			materializeDeep(val, seen)
+		}
+		for _, key := range n.Keys {
+			materializeDeep(key, seen)
+		}
+	}
+}
+
+// concreteSlice materializes any SageRefs in a slice (shallow), returning a new
+// slice only if a substitution occurred.
+func concreteSlice(vs []Value) []Value {
+	changed := false
+	out := vs
+	for i, v := range vs {
+		if _, ok := v.(*SageRef); ok {
+			if !changed {
+				out = make([]Value, len(vs))
+				copy(out, vs)
+				changed = true
+			}
+			out[i] = concrete(v)
+		}
+	}
+	return out
 }
 
 // newSageBackend constructs (but does not start) a Sage backend. The Sage
@@ -74,12 +253,14 @@ func newSageBackend() (*SageBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SageBackend{
+	b := &SageBackend{
 		sageBin: sageBin,
 		script:  script,
 		debug:   os.Getenv("OPENMAPLE_CAS_DEBUG") != "",
 		timeout: 120 * time.Second,
-	}, nil
+		useRefs: os.Getenv("OPENMAPLE_DISABLE_REFS") == "",
+	}
+	return b, nil
 }
 
 // findSageServerScript locates cas/sage_server.py.
@@ -147,6 +328,44 @@ func (s *SageBackend) ensureStarted() error {
 		s.cmd = nil
 	}
 	return s.start()
+}
+
+// ClearCache drops the ENTIRE Sage-side expression-handle cache. Called at
+// top-level decomposition-statement boundaries (see runFile) to bound memory on
+// long runs. After a clear, any still-live SageRef whose value has NOT yet been
+// materialized would become a dangling handle — so the interpreter only clears
+// at points where no SageRef from a prior statement can still be referenced
+// (statement results that survive are bound names whose values, if refs, were
+// already materialized by printing/inspection during the statement).
+func (s *SageBackend) ClearCache() error {
+	if !s.useRefs {
+		return nil
+	}
+	req := &sageRequest{Op: "clear", Args: []json.RawMessage{}}
+	resp, err := s.roundtrip(req)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("sage clear: %s", resp.Error)
+	}
+	return nil
+}
+
+// reportRefStats prints a one-line summary of the expression-handle traffic for
+// the run (to stderr), so the example-suite runner and a human can see refs'
+// effect: how many result handles were issued, how many had to be materialized,
+// and the {"ref"} vs {"poly"} arg split. No-op when the backend has no refs.
+func (it *Interp) reportRefStats() {
+	s, ok := it.cas.(*SageBackend)
+	if !ok || !s.useRefs {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(stderrW(),
+		"[ref-stats] issued=%d materialized=%d ref-args=%d poly-args=%d\n",
+		s.refsIssued, s.refsMaterialized, s.refArgsSent, s.polyArgsSent)
 }
 
 // Close terminates the subprocess.
@@ -281,11 +500,12 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 	}
 
 	req := &sageRequest{
-		Op:     op,
-		Member: member,
-		Vars:   san.varList(),
-		Args:   reqArgs,
-		Frac:   frac,
+		Op:      op,
+		Member:  member,
+		Vars:    san.varList(),
+		Args:    reqArgs,
+		Frac:    frac,
+		WantRef: s.useRefs,
 	}
 
 	resp, err := s.roundtrip(req)
@@ -389,6 +609,17 @@ func (s *SageBackend) encodeArgs(op, member string, args []Value, san *sanitizer
 // encodeArg serializes one Value operand to the wire arg form.
 func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMessage, error) {
 	switch n := v.(type) {
+	case *SageRef:
+		// If this ref has already been materialized (its server-side handle may
+		// since have been cleared at a statement boundary), send the concrete
+		// value as a string — sending the stale {"ref":N} would be a cache miss.
+		// Otherwise send the handle by-reference: the server resolves it from its
+		// cache and coerces into the op's ring, with no string serialization.
+		if mv, ok := n.materialized(); ok {
+			return s.encodeArg(op, mv, san)
+		}
+		s.refArgsSent++
+		return json.Marshal(map[string]int{"ref": n.id})
 	case Integer:
 		return json.Marshal(map[string]string{"int": n.Val.String()})
 	case Name:
@@ -421,6 +652,7 @@ func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMes
 	default:
 		// polynomial / rational / symbolic expression -> sanitized string
 		str := san.sanitizeExpr(v)
+		s.polyArgsSent++
 		return json.Marshal(map[string]string{"poly": str})
 	}
 }
@@ -468,6 +700,16 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		return nil, fmt.Errorf("bad sage result for %s: %w", op, err)
 	}
 
+	if r, ok := m["ref"]; ok {
+		var id int
+		if err := json.Unmarshal(r, &id); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		s.refsIssued++
+		s.mu.Unlock()
+		return &SageRef{be: s, id: id, san: san}, nil
+	}
 	if r, ok := m["poly"]; ok {
 		var str string
 		if err := json.Unmarshal(r, &str); err != nil {
@@ -680,6 +922,22 @@ func (s *sanitizer) collect(args []Value) {
 
 func (s *sanitizer) walkCollect(v Value) {
 	switch n := v.(type) {
+	case *SageRef:
+		// A ref's expression lives Sage-side in a ring whose generators were
+		// sanitized by the ref's own sanitizer. Merge those sanitized var names
+		// (and their reverse mapping) so this request's vars list covers every
+		// generator the cached object uses — otherwise the server's coercion ring
+		// would be missing generators and the ref-coerce fallback would fail.
+		if n.san != nil {
+			for san, orig := range n.san.back {
+				if n.san.vars[san] {
+					s.vars[san] = true
+					if _, ok := s.back[san]; !ok {
+						s.back[san] = orig
+					}
+				}
+			}
+		}
 	case *Indexed:
 		s.sanitizeIndexed(n)
 	case Name:
@@ -939,6 +1197,11 @@ func printSanitized(v Value, s *sanitizer) string {
 
 func printSanPrec(v Value, parent int, s *sanitizer) string {
 	switch n := v.(type) {
+	case *SageRef:
+		// A SageRef nested inside a container arg (List/Set/exprlist) must be
+		// materialized before it can be stringified for the wire. Top-level ref
+		// args take the {"ref":N} path in encodeArg and never reach here.
+		return printSanPrec(concrete(n), parent, s)
 	case Integer:
 		return n.Val.String()
 	case Rational:

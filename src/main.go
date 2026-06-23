@@ -29,8 +29,11 @@ func runFile(path string) int {
 		return 1
 	}
 	it := NewInterp()
-	_, execErr := it.Exec(string(data))
+	_, execErr := it.ExecProgram(string(data))
 	fmt.Fprint(os.Stdout, it.out.String())
+	// Emit the ref-traffic / coercion-fallback summary so the example-suite
+	// runner (and a human) can see the optimization's effect on this run.
+	it.reportRefStats()
 	if execErr != nil {
 		fmt.Fprintln(os.Stderr, "error: "+execErr.Error())
 		return 1

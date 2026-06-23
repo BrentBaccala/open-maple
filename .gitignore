@@ -11,3 +11,5 @@ src/openmaple_dbg
 # downloaded Maplesoft help pages (copyright Maplesoft; reference only, not committed)
 maple-help/
 verify/__pycache__/
+cas/__pycache__/
+__pycache__/

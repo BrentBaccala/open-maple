@@ -148,6 +148,7 @@ func (it *Interp) derefTable(v Value) Value {
 
 // operands returns the Maple op-list of a value (its top-level subparts).
 func operands(v Value) []Value {
+	v = concrete(v) // a ref must be materialized to enumerate its operands
 	switch x := v.(type) {
 	case List:
 		return x.Items
@@ -255,6 +256,7 @@ func biOp(it *Interp, args []Value) (Value, error) {
 
 // op0 returns op(0, expr): the head/type indicator.
 func op0(v Value) Value {
+	v = concrete(v)
 	switch x := v.(type) {
 	case *Func:
 		return x.Head
@@ -279,7 +281,7 @@ func biNops(it *Interp, args []Value) (Value, error) {
 	if err := need(args, 1, "nops"); err != nil {
 		return nil, err
 	}
-	switch x := args[0].(type) {
+	switch x := concrete(args[0]).(type) {
 	case List:
 		return newInt(int64(len(x.Items))), nil
 	case Set:
@@ -328,6 +330,9 @@ func biType(it *Interp, args []Value) (Value, error) {
 // checkTypeValue checks a value against a type given as a *value* (Name, String,
 // Func like list(symbol), Set of alternatives). Used by the type() builtin.
 func (it *Interp) checkTypeValue(v Value, typ Value) (bool, error) {
+	// Structural type predicates (type(p,`+`)/`*`/`^`/polynom/...) inspect the
+	// concrete expression, so a ref must be materialized first.
+	v = concrete(v)
 	switch t := typ.(type) {
 	case Name:
 		return it.checkNamedTypeV(v, t.Val, nil)
@@ -455,6 +460,9 @@ func biMap2(it *Interp, args []Value) (Value, error) {
 }
 
 func mapOver(coll Value, apply func(Value) (Value, error)) (Value, error) {
+	// map walks the operands of a compound value; a ref must be materialized so
+	// the mapped function sees its structure, not the opaque handle.
+	coll = concrete(coll)
 	switch c := coll.(type) {
 	case List:
 		// Maple's map builds a container from f(item) results. A NULL result
@@ -649,6 +657,10 @@ func collectSubs(s Value, pairs *[][2]Value) {
 }
 
 func substitute(expr Value, pairs [][2]Value) Value {
+	// A ref must be materialized before substitution walks its structure —
+	// otherwise subs silently no-ops on the opaque handle (which would, e.g.,
+	// leave DT's JetList2Diff jet->diff replacement unapplied).
+	expr = concrete(expr)
 	for _, p := range pairs {
 		if equalValues(expr, p[0]) {
 			return p[1]
@@ -694,7 +706,7 @@ func biSubsop(it *Interp, args []Value) (Value, error) {
 	if err := need(args, 2, "subsop"); err != nil {
 		return nil, err
 	}
-	expr := args[len(args)-1]
+	expr := concrete(args[len(args)-1])
 	repls := args[:len(args)-1]
 	ops := operands(expr)
 	newOps := append([]Value{}, ops...)
@@ -1671,7 +1683,7 @@ func biWhattype(it *Interp, args []Value) (Value, error) {
 }
 
 func whatType(v Value) string {
-	switch v.(type) {
+	switch concrete(v).(type) {
 	case Integer:
 		return "integer"
 	case Rational:

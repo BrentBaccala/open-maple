@@ -102,6 +102,7 @@ func (it *Interp) compose(f, g Value) Value {
 }
 
 func (it *Interp) neg(v Value) Value {
+	v = concrete(v)
 	switch n := v.(type) {
 	case Integer:
 		return Integer{new(big.Int).Neg(n.Val)}
@@ -121,6 +122,9 @@ func (it *Interp) neg(v Value) Value {
 }
 
 func (it *Interp) arithAdd(a, b Value) (Value, error) {
+	// Arithmetic is performed natively in Go on the value AST, so a ref operand
+	// must be materialized first (it cannot be left as an opaque term).
+	a, b = concrete(a), concrete(b)
 	if r, ok := numAdd(a, b); ok {
 		return r, nil
 	}
@@ -147,6 +151,7 @@ func (it *Interp) arithAdd(a, b Value) (Value, error) {
 }
 
 func (it *Interp) arithMul(a, b Value) (Value, error) {
+	a, b = concrete(a), concrete(b)
 	if r, ok := numMul(a, b); ok {
 		return r, nil
 	}
@@ -191,6 +196,7 @@ func (it *Interp) scaleList(l List, s Value) (Value, error) {
 }
 
 func (it *Interp) arithDiv(a, b Value) (Value, error) {
+	a, b = concrete(a), concrete(b)
 	if ra, ok := toRat(a); ok {
 		if rb, ok := toRat(b); ok {
 			if rb.Sign() == 0 {
@@ -205,6 +211,7 @@ func (it *Interp) arithDiv(a, b Value) (Value, error) {
 }
 
 func (it *Interp) arithPow(a, b Value) (Value, error) {
+	a, b = concrete(a), concrete(b)
 	if ai, ok := a.(Integer); ok {
 		if bi, ok := b.(Integer); ok {
 			if bi.Val.Sign() >= 0 && bi.Val.IsInt64() {
@@ -238,6 +245,7 @@ func (it *Interp) arithPow(a, b Value) (Value, error) {
 }
 
 func (it *Interp) arithMod(a, b Value) (Value, error) {
+	a, b = concrete(a), concrete(b)
 	ai, aok := intVal(a)
 	bi, bok := intVal(b)
 	if aok && bok {
@@ -307,6 +315,7 @@ func toFloat(v Value) (float64, bool) {
 // ---- symbolic helpers -------------------------------------------------------
 
 func sumTerms(v Value) []Value {
+	v = concrete(v)
 	if s, ok := v.(*Sum); ok {
 		return s.Terms
 	}
@@ -314,6 +323,7 @@ func sumTerms(v Value) []Value {
 }
 
 func prodFactors(v Value) []Value {
+	v = concrete(v)
 	if p, ok := v.(*Prod); ok {
 		return p.Factors
 	}
