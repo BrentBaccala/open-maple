@@ -577,7 +577,15 @@ func containsOpaque(v Value) bool {
 				return true
 			}
 		}
-	case *Equation, *Relation, *Table:
+	case *Equation:
+		// An equation is opaque only if one of its sides is — a plain
+		// polynomial equation a = b must reach the CAS so normal/expand/numer/
+		// denom can map over the sides (the op handlers split on the relation).
+		return containsOpaque(n.Lhs) || containsOpaque(n.Rhs)
+	case *Relation:
+		return containsOpaque(n.Lhs) || containsOpaque(n.Rhs)
+	case *Table:
+		// A table has no expression-string form; genuinely opaque.
 		return true
 	}
 	return false

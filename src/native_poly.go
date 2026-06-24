@@ -96,6 +96,18 @@ func (it *Interp) tryNativePoly(name string, args []Value) (Value, bool) {
 				return v, true
 			}
 		}
+		// gcd of two integer constants: native follows Maple's integer-gcd
+		// convention (gcd(2,4)=2), while Sage over a field returns 1 (every
+		// nonzero constant is a unit). Native is authoritative here, so don't
+		// compare. (Rational-constant gcds return ok=false above and route to
+		// Sage, so they never reach this point.)
+		if name == "gcd" && len(args) == 2 {
+			_, i0 := args[0].(Integer)
+			_, i1 := args[1].(Integer)
+			if i0 && i1 {
+				return v, true
+			}
+		}
 		// Compare against Sage only when Sage itself produces a value: the Sage
 		// path errors on inputs native handles correctly (e.g. degree(3, x) — the
 		// degree of a constant — makes op_degree raise), and there native is the

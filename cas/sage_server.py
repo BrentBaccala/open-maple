@@ -642,7 +642,77 @@ def op_lcm(req):
     return enc_poly(acc)
 
 
+# Relational operators as they appear on the wire (space-padded; sanitizeExpr
+# emits "lhs = rhs", "p <> 0", etc.). Longer / two-char ops first so a prefix
+# scan never mis-splits "<=" as "<".
+_REL_OPS = (" <> ", " <= ", " >= ", " = ", " < ", " > ")
+
+
+def _split_relation(s):
+    """Split 'lhs OP rhs' on the single top-level (paren-depth 0) relational
+    operator. Returns (op, lhs, rhs) with op/lhs/rhs stripped, or None when there
+    is no top-level relation. Maple forbids relations nested in arithmetic, so at
+    depth 0 there is at most one."""
+    depth = 0
+    for i, c in enumerate(s):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0:
+            for op in _REL_OPS:
+                if s[i:i + len(op)] == op:
+                    return op.strip(), s[:i].strip(), s[i + len(op):].strip()
+    return None
+
+
+def _map_structure(req, op_fn):
+    """Maple's normal/expand/numer/denom (and friends) apply RECURSIVELY through
+    lists, sets, and equations/relations (normal help page: "applies recursively
+    to lists, sets, ranges, equations, relations"). open-maple wires a list/set
+    as {"exprlist": [...]} and an equation/relation as {"poly": "lhs OP rhs"}.
+    If the first arg is such a structure, apply op_fn elementwise and return the
+    same shape; otherwise return None so the caller runs its scalar path.
+
+    op_fn is the op handler itself, re-invoked on a single scalar {"poly": ...}
+    arg — a scalar never re-enters this branch, so the recursion terminates."""
+    a = req["args"][0]
+    if not isinstance(a, dict):
+        return None
+    vars = req.get("vars", [])
+    if "exprlist" in a:
+        # list/set: map over elements (the list-vs-set distinction is not carried
+        # on the wire, so the result comes back as a list).
+        return enc_list([op_fn({"vars": vars, "args": [{"poly": s}]})
+                         for s in a["exprlist"]])
+    if "poly" in a:
+        split = _split_relation(a["poly"])
+        if split is not None:
+            opstr, lhs, rhs = split
+            ls = _enc_str(op_fn({"vars": vars, "args": [{"poly": lhs}]}))
+            rs = _enc_str(op_fn({"vars": vars, "args": [{"poly": rhs}]}))
+            if ls is not None and rs is not None:
+                return {"poly": "%s %s %s" % (ls, opstr, rs)}
+    return None
+
+
+def _enc_str(enc):
+    """Expression-string form of a scalar enc result ({"poly":...}, a {"ref":...}
+    handle materialized via the cache, or {"int":...}); None for anything else
+    (e.g. a {"list":...}), so the caller can decline to recombine."""
+    if "poly" in enc:
+        return enc["poly"]
+    if "ref" in enc:
+        return str(cache_get(enc["ref"]))
+    if "int" in enc:
+        return enc["int"]
+    return None
+
+
 def op_expand(req):
+    mapped = _map_structure(req, op_expand)
+    if mapped is not None:
+        return mapped
     # expand over SR to handle symbolic too, then return string.
     try:
         R = make_ring(req["vars"])
@@ -655,6 +725,9 @@ def op_expand(req):
 
 def op_normal(req):
     """normal(f) -> simplified rational function string."""
+    mapped = _map_structure(req, op_normal)
+    if mapped is not None:
+        return mapped
     R = make_ring(req["vars"], frac=True)
     f = decode_arg(req["args"][0], R)
     # FractionField elements are automatically in lowest terms.
@@ -662,12 +735,18 @@ def op_normal(req):
 
 
 def op_numer(req):
+    mapped = _map_structure(req, op_numer)
+    if mapped is not None:
+        return mapped
     R = make_ring(req["vars"], frac=True)
     f = decode_arg(req["args"][0], R)
     return enc_poly(f.numerator())
 
 
 def op_denom(req):
+    mapped = _map_structure(req, op_denom)
+    if mapped is not None:
+        return mapped
     R = make_ring(req["vars"], frac=True)
     f = decode_arg(req["args"][0], R)
     return enc_poly(f.denominator())
