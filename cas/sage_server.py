@@ -389,6 +389,46 @@ def decode_into_ring(a, R):
     return v
 
 
+def decode_allow_frac(a, varnames):
+    """Decode an operand so a genuine FRACTION survives, returning a pair
+    (value, poly_ring) where poly_ring is the polynomial ring (frac=False) the
+    polynomial case lives in.
+
+    Semantics (matches what content/primpart want):
+      - plain ZZ/QQ scalar  -> lifted into the polynomial ring (so it gains
+        .degree(x)/.coefficient/... — do not regress the ex4 primpart->1->degree
+        fix from decode_into_ring);
+      - polynomial (denominator 1 over the fraction field) -> polynomial-ring
+        element;
+      - genuine fraction n/d  -> fraction-field element (NOT force-coerced into
+        the polynomial ring, which would raise "fraction must have unit
+        denominator").
+
+    Parsing happens over the FRACTION FIELD so a fractional {"poly"} string (or
+    a fraction-valued ref) does not blow up in decode_arg before we can inspect
+    it. We then demote back to the polynomial ring when the value is integral."""
+    R = make_ring(varnames)            # polynomial ring (frac=False)
+    F = make_ring(varnames, frac=True)  # its fraction field
+    v = decode_arg(a, F)
+    # decode_arg may hand back a bare python/Sage scalar (an {"int"} or {"raw"}
+    # arg) — lift it into the polynomial ring directly.
+    try:
+        p = v.parent()
+    except Exception:
+        return R(v), R
+    if p in (ZZ, QQ):
+        return R(v), R
+    # A fraction-field element with unit denominator is really a polynomial:
+    # demote it into R so the existing polynomial path runs unchanged.
+    try:
+        if v.denominator() == 1:
+            return R(v.numerator()), R
+    except (AttributeError, TypeError):
+        pass
+    # genuine fraction (or some other ring element) -> leave it alone
+    return v, R
+
+
 def decode_arg(a, R):
     """Decode one request arg into a ring element (or python scalar)."""
     if "poly" in a:
@@ -920,20 +960,47 @@ def _vnames_arg(a):
     return []
 
 
-def op_primpart(req):
-    R = make_ring(req["vars"])
-    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
-    if p == 0:
-        return enc_int(0)
-    # primpart(p, V) = p / content(p, V). Like content, the two-arg form must
-    # divide out the *polynomial* content w.r.t. V, not just the rational content.
+def _poly_content(p, req):
+    """content(p, V) for a POLYNOMIAL p, dispatching on the one-/two-arg form
+    exactly as op_content does for the polynomial case."""
     if len(req["args"]) < 2:
-        c = _content(p)
-    else:
-        c = _content_wrt(p, _vnames_arg(req["args"][1]))
+        return _content(p)              # one-arg: rational content
+    return _content_wrt(p, _vnames_arg(req["args"][1]))
+
+
+def _poly_primpart(p, req):
+    """primpart(p, V) = p / content(p, V) for a POLYNOMIAL p."""
+    if p == 0:
+        return p
+    c = _poly_content(p, req)
     if c == 0:
-        return enc_poly(p)
-    return enc_poly(p / c)
+        return p
+    return p / c
+
+
+def op_primpart(req):
+    # Decode so a genuine fraction survives (the ex4 reciprocal 1/X). A plain
+    # scalar is lifted into R; a polynomial stays in R; a fraction stays in F.
+    v, R = decode_allow_frac(req["args"][0], req["vars"])
+    is_frac = (v.parent() is not R)
+    if not is_frac:
+        # ---- polynomial path: unchanged behavior ----
+        if v == 0:
+            return enc_int(0)
+        return enc_poly(_poly_primpart(v, req))
+    # ---- rational path: Maple's multiplicative extension ----
+    #   primpart(n/d, V) = primpart(n, V) / primpart(d, V)
+    # Sign rule: content carries the sign (positive), primpart keeps it; the
+    # polynomial helpers already follow that convention, so applying them to
+    # numerator and denominator separately stays consistent.
+    F = v.parent()
+    n = v.numerator()
+    d = v.denominator()
+    if n == 0:
+        return enc_int(0)
+    pn = _poly_primpart(n, req)
+    pd = _poly_primpart(d, req)
+    return enc_poly(F(pn) / F(pd))
 
 
 def _content_wrt(p, Vnames):
@@ -980,13 +1047,26 @@ def _content_wrt(p, Vnames):
 
 
 def op_content(req):
-    R = make_ring(req["vars"])
-    p = decode_into_ring(req["args"][0], R)  # coerce: see op_degree
-    if p == 0:
+    # Decode so a genuine fraction survives (see decode_allow_frac).
+    v, R = decode_allow_frac(req["args"][0], req["vars"])
+    is_frac = (v.parent() is not R)
+    if not is_frac:
+        # ---- polynomial path: unchanged behavior ----
+        if v == 0:
+            return enc_int(0)
+        return enc_poly(_poly_content(v, req))
+    # ---- rational path: Maple's multiplicative extension ----
+    #   content(n/d, V) = content(n, V) / content(d, V)
+    F = v.parent()
+    n = v.numerator()
+    d = v.denominator()
+    if n == 0:
         return enc_int(0)
-    if len(req["args"]) < 2:
-        return enc_poly(_content(p))   # one-arg: rational content
-    return enc_poly(_content_wrt(p, _vnames_arg(req["args"][1])))
+    cn = _poly_content(n, req)
+    cd = _poly_content(d, req)
+    if cd == 0:
+        return enc_poly(F(cn))
+    return enc_poly(F(cn) / F(cd))
 
 
 def _squarefree_via_factor(p):

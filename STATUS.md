@@ -21,9 +21,47 @@ notation** input (`diff(u(x),x)`):
 - `ex2_params`       — 3 parts incl. the parametric `a=0` vs `a<>0` split
 - `ex3_ode1d`        — 4 jets + 7 params 1D ODE ansatz → 13 simple systems
 - `ex4_hydrogen`     — the JOCA-paper hydrogen ansatz (3 ivar, 5 jets, 10 params,
-  39 eqs) → **29 simple systems**, ~18 min wall. The largest system run to date.
-  It `save`s its result to `hydrogen_thomas_result.m` (reloads via `read` in
-  ~0.4 s, vs the 18-min recompute).
+  39 eqs), ~18–30 min wall. The largest system run to date. Its pass criterion is
+  **completion without error** (`HYDROGEN_THOMAS_DONE` + exit 0), **not** a
+  specific cell count — see the content/primpart-rational note below. It `save`s
+  its result to `hydrogen_thomas_result.m` (reloads via `read` in ~0.4 s, vs the
+  recompute).
+
+## content / primpart over rational operands (361fbae root cause)
+
+`content` and `primpart` are extended to **rational functions** in Sage's
+`cas/sage_server.py`, matching Maple's documented multiplicative rule
+(`~/open-maple/maple-help/content.md`): for `f` in {content, primpart},
+`f(n/d, V) = f(n, V) / f(d, V)`. Previously both ops force-coerced their operand
+into a polynomial ring and raised `primpart: fraction must have unit denominator`
+on any genuine fraction.
+
+The crash surfaced via ex4_hydrogen and was bisected to commit **361fbae**
+("parenthesize a power's base when serializing for Sage"):
+
+- DT forms the reciprocal `((b1^3*x^2*z)^1)^-1`, takes its `denom`, and calls
+  `primpart` on the resulting rational function `(big num)·(x^2·z)^-1`.
+- **Before 361fbae** the Go side emitted `(b1^3*x^2*z)^1^-1`. Sage's `^` is
+  right-associative, so that parsed as `X^(1^-1)` = `X^1` = X — a *polynomial*
+  (the reciprocal silently collapsed because `1^-1 = 1`). primpart only ever saw
+  polynomials, so the old ex4 ran (and its old "29" cells were computed from this
+  **wrong** intermediate — X instead of 1/X).
+- **361fbae** correctly emits `((X)^1)^-1` = `X^-1` = 1/X — a genuine fraction.
+  This is mathematically correct and is **not** reverted. It exposed the real,
+  latent gap that this fix closes.
+
+Because the old "29" came from a buggy intermediate and there is **no Maple
+ground-truth output** to compare against, ex4's regression check is now
+"completes without error", and the corrected cell count may legitimately differ.
+
+Fix (in `cas/sage_server.py`): `decode_allow_frac` parses the operand over the
+fraction field so a fraction survives (demoting unit-denominator values back to
+the polynomial ring, and lifting bare scalars so the `degree(primpart→1)` fix
+still holds). `op_content`/`op_primpart` keep the existing polynomial path
+unchanged and add a rational branch applying the multiplicative rule to the
+numerator and denominator separately via the existing `_content`/`_content_wrt`
+helpers (sign carried by the content, per Maple). Tested by
+`cas/test_content_primpart.py`.
 
 Reaching the ex[123] set surfaced a string of latent interpreter bugs (see the
 §"latent bugs" list below and the git log): indets dropping function/derivative
