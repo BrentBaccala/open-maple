@@ -926,17 +926,64 @@ def _univariate_in_x(R, x):
     return PolynomialRing(FractionField(_coeff_ring_excluding(R, x)), str(x))
 
 
-def _back_to_R(R, e):
-    """Coerce an element of Frac(other)[x] (or its coefficients-over-Frac form)
-    back into the multivariate ring R, clearing any denominators that are pure
-    rationals. The results of rem/quo/prem/pquo on polynomials in x with
-    coefficients polynomial in the other vars are themselves polynomials in R."""
+def _back_to_R(R, e, x=None):
+    """Coerce an element of Frac(other)[x] back into the multivariate ring R.
+
+    The results of rem/quo/prem/pquo are polynomials in x with coefficients
+    polynomial (or rational) in the other vars, hence members of R (or Frac(R)
+    when a coefficient is genuinely rational). When the main variable x is known,
+    we rebuild R-element STRUCTURALLY from the univariate coefficient list:
+    sum_i (coeff_i coerced into R) * x^i. Each coeff_i is a FractionFieldElement
+    over QQ[other]; its numerator/denominator are polynomials whose generators
+    share R's names, so they coerce into R directly via libSingular.
+
+    This structural path avoids the catastrophic str()->SR->coerce fallback:
+    R(e) on a large univariate-over-Frac element raises RecursionError during
+    compilation (the same deep-AST issue rebalance fixes for parse), which sent
+    the prem result through R(SR(str(e))) -- a 2.9 MB-string round trip that took
+    >400 s on the combined-hydrogen pseudo-remainder. The structural rebuild does
+    the same work in ~1 s and stays entirely in libSingular.
+
+    Without x (no main var), fall back to the direct/SR coercion as before."""
+    if x is not None:
+        try:
+            return _back_to_R_struct(R, e, x)
+        except Exception:
+            pass  # structural path failed; fall through to the generic coercions
     try:
         return R(e)
     except Exception:
         pass
     # e may be a univariate poly over Frac(other); rebuild term by term.
     return R(SR(str(e)))
+
+
+def _back_to_R_struct(R, e, x):
+    """Structural coercion of a univariate-in-x polynomial over Frac(QQ[other])
+    into R (or Frac(R) if a coefficient is genuinely rational). See _back_to_R."""
+    Rx = R(x)
+    res = R.zero()
+    acc_x = R.one()                # x^i, built incrementally
+    FR = None                      # Frac(R), lazily, only if a rational coeff appears
+    for c in e.list():             # [c0, c1, ...] low-to-high; constants give []
+        if c != 0:
+            num = c.numerator()
+            den = c.denominator()
+            Rnum = R(num)
+            Rden = R(den)
+            if Rden == 1:
+                cR = Rnum
+            else:
+                if FR is None:
+                    FR = FractionField(R)
+                cR = FR(Rnum) / FR(Rden)
+                # if the rational coeff actually divides out to a polynomial,
+                # keep it in R so the result is a clean polynomial.
+                if cR.denominator() == 1:
+                    cR = R(cR.numerator())
+            res = res + cR * acc_x
+        acc_x = acc_x * Rx
+    return res
 
 
 def op_rem(req):
@@ -953,7 +1000,7 @@ def op_rem(req):
         Ru = _univariate_in_x(R, x)
         au, bu = Ru(a), Ru(b)
         _, r = au.quo_rem(bu)
-        return enc_poly(_back_to_R(R, r))
+        return enc_poly(_back_to_R(R, r, x))
     _, r = a.quo_rem(b)
     return enc_poly(r)
 
@@ -970,7 +1017,7 @@ def op_quo(req):
         Ru = _univariate_in_x(R, x)
         au, bu = Ru(a), Ru(b)
         q, _ = au.quo_rem(bu)
-        return enc_poly(_back_to_R(R, q))
+        return enc_poly(_back_to_R(R, q, x))
     q, _ = a.quo_rem(b)
     return enc_poly(q)
 
@@ -987,8 +1034,8 @@ def op_prem(req):
         au = Ru(a)
         bu = Ru(b)
         q, r = au.pseudo_quo_rem(bu)
-        return enc_poly(_back_to_R(R, r.numerator()) if hasattr(r, 'numerator')
-                        else _back_to_R(R, r))
+        return enc_poly(_back_to_R(R, r.numerator(), x) if hasattr(r, 'numerator')
+                        else _back_to_R(R, r, x))
     # 2-arg fallback: no main variable supplied. Sage's multivariate ring has no
     # .pseudo_quo_rem; require the explicit variable rather than guess a main
     # variable (DT always calls the 3-arg form).
@@ -1008,8 +1055,8 @@ def op_pquo(req):
         au = Ru(a)
         bu = Ru(b)
         q, r = au.pseudo_quo_rem(bu)
-        return enc_poly(_back_to_R(R, q.numerator()) if hasattr(q, 'numerator')
-                        else _back_to_R(R, q))
+        return enc_poly(_back_to_R(R, q.numerator(), x) if hasattr(q, 'numerator')
+                        else _back_to_R(R, q, x))
     raise ValueError("pquo(a, b) requires an explicit main variable x: "
                      "use pquo(a, b, x)")
 

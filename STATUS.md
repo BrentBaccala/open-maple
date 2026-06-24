@@ -230,6 +230,43 @@ shares `*`'s precedence, so a `/` is *never* swallowed into a balanced group:
 combined frontier still has other open issues — this fix only removes the
 deep-AST overflow.
 
+### Combined-run wall #3: `_back_to_R` result coercion (task 428)
+
+After the astfold fixes, the combined run hit the Go-side 120 s per-call timeout
+on `op=prem`. DIAGNOSIS (task 428, `cas/bench_prem.py` on the captured failing
+operand `cas/fixtures/prem_combined_hydrogen.json`): the wall was NEITHER parse
+nor compute. On that 56 KB operand —
+
+    parse  (decode_arg + coerce into Frac(other)[x]) :   1.1 s
+    compute (pseudo_quo_rem)                          :   0.3 s
+    _back_to_R (coerce result into R)                 : 432.3 s   <-- the wall
+
+So caching the operands (refs) would not have helped, and the algorithm is fine.
+The bottleneck was result coercion. `op_prem` divides in `Frac(QQ[other])[x]`;
+the `d^e` pseudo-division blowup makes the remainder numerator a ~2.9 MB / 47k-
+term polynomial. `_back_to_R` tried `R(e)` first, which raises `RecursionError`
+during `compile()` (the SAME deep-AST issue `rebalance` fixes for *parse*, but on
+the *result*), then fell through to `R(SR(str(e)))` — a 2.9 MB-string → symbolic-
+ring → coerce round trip that took >400 s.
+
+Fix: `_back_to_R(R, e, x)` now rebuilds the multivariate element STRUCTURALLY
+from the univariate-in-x coefficient list (`_back_to_R_struct`): for each
+`coeff_i` (a `FractionFieldElement` over `QQ[other]`), coerce its numerator and
+denominator into R via libSingular and sum `coeff_i * x^i`. No str()/SR round
+trip, no `compile()`. The big operand now coerces in **0.36 s** (≈1200×), and the
+structural result is bit-equal to the old SR path on every mid-size captured
+operand (`test_back_to_R.py`). `op_rem`/`op_quo`/`op_pquo` were updated to pass
+`x` too; genuinely-rational coefficients fall back to `Frac(R)` (covered by
+`test_back_to_R.test_rational_coefficient_via_rem`). The 2-arg paths (no main
+var) keep the old behavior.
+
+This removes the combined run's prem wall — the frontier is now bounded by the
+*intrinsic* size of the no-end-reduction intermediates (2.9 MB prem results that
+downstream `factor`/`denom`/`degree` must then chew through), not by a bridge
+inefficiency. Refs caching (would have addressed a parse wall) and the
+division-chain rebalance extension were therefore NOT needed for this wall and
+were left for if/when a future operand is shown to be parse-bound.
+
 **Refs** are an optimization layered on top of the string protocol (correctness
 identical with refs off — disable via `OPENMAPLE_DISABLE_REFS=1`, a bisection
 switch like `OPENMAPLE_DISABLE_NATIVE`):
