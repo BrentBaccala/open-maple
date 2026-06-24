@@ -67,6 +67,40 @@ B = "+".join(f"{(i % 3) + 1}*x^{i % 4}*z^{i % 5}" for i in range(20000))
 q = S.parse_in_ring(f"({A})*({B})^-1", F)
 check("large rational (A)*(B)^-1 parses", q != 0)
 
+# 3b) MULTIPLICATIVE chains must also be balanced. The combined hydrogen
+#     pseudo-remainders (op=prem) hand us single monomials that are flat products
+#     of thousands of factors, e.g. x*x*...*x. rebalance() only balanced '+'/'-'
+#     chains; a deep left-associated '*' AST overflows compile()/astfold the same
+#     way a flat sum does. This is the combined-run astfold crash this fix closes.
+N = 30000
+deep_mult = "*".join(["x"] * N)
+t0 = time.time()
+pm = S.parse_in_ring(deep_mult, R)
+check(f"{N}-factor flat product parses without C-stack overflow "
+      f"({time.time()-t0:.1f}s)", pm == R('x') ** N)
+
+# 3c) multiplicative reassociation must be EXACT, including powers, leading
+#     signs, and division (which must stay LEFT-associative: a/b*c == (a/b)*c,
+#     never a/(b*c); a/b/c == (a/b)/c). Check value preservation.
+mult_samples = [
+    "2*x*y*z*x*y*z*x*y*z",          # pure product
+    "- 1*2*x^2*y*z^3*x*y",          # leading sign + coefficient + powers
+    "a1^2*x*y*z*V2*x*y",            # mixed gens with powers
+]
+for s in mult_samples:
+    a = R(sage_eval(s, locals=ns))
+    b = R(sage_eval(S.rebalance(s), locals=ns))
+    check("mult value-preserving: " + s[:40], a == b)
+
+for s, ring, namespace in [
+    ("x/y/z", F, nsf),               # division stays left-associative
+    ("x*y/z*x", F, nsf),             # mixed * and /
+    ("2*x/y/z*y*z", F, nsf),
+]:
+    a = ring(sage_eval(s, locals=namespace))
+    b = ring(sage_eval(S.rebalance(s), locals=namespace))
+    check("div left-assoc preserved: " + s[:40], a == b)
+
 # 4) comma argument-lists must survive: rebalance must NOT collapse f(x,y,z)
 #    into f((x,y,z)) (a single tuple arg). Check via parse_symbolic on diff().
 from sage.calculus.functional import diff as _diff  # noqa: E402,F401

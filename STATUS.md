@@ -204,6 +204,32 @@ computed, and returned another full string that Go re-parsed. For the combined
 hydrogen system (no end reduction) those strings reach ~200 KB / ~47k terms —
 the direct cause of the astfold_expr C-stack SIGSEGV (commits d31b89e, 9e54eed).
 
+### Combined-run astfold crash #2: deep MULTIPLICATIVE chains
+
+The combined hydrogen run (`ex4_hydrogen_combined.mpl`, no end reduction) still
+crashed in `astfold_expr` ~39 min in (24958 stacked frames, all at the same call
+site = a single flat left-deep chain). The original `rebalance` only balanced
+**additive** (`+`/`-`) chains: it split a sum into terms and recursed into
+parentheses, but left each term's top-level **multiplicative** chain flat. The
+combined system's pseudo-remainders (`op=prem`) and `degree`/`coeff` operands
+include single monomials that are flat products of thousands of factors
+(`x*x*…*x`); a flat `a*b*c*…` compiles to a left-deep `BinOp(Mult)` AST that
+overflows `compile()`/astfold exactly like a flat sum. Confirmed against the real
+parse path: a 30000-factor product `RecursionError`s during compilation (off the
+main thread / under cysignals this surfaces as the astfold SIGSEGV).
+
+Fix (this session): `rebalance` now also balances multiplicative chains.
+`_split_top_multiplicative` splits each additive term into factors at top
+paren-depth, keeping `^` glued to its base (`x^4` is one factor); `_balanced_mult`
+reassociates maximal runs of `*`-connected factors into a balanced binary tree
+(exact over QQ — multiplication is associative). Division is left-associative and
+shares `*`'s precedence, so a `/` is *never* swallowed into a balanced group:
+`a/b*c` stays `(a/b)*c`, `a/b/c` stays `(a/b)/c`. Value-preservation is fuzzed
+(500 random exprs with powers/signs/division) and pinned by `test_rebalance.py`
+(30000-factor product parses; mult/div samples are value-preserving). The
+combined frontier still has other open issues — this fix only removes the
+deep-AST overflow.
+
 **Refs** are an optimization layered on top of the string protocol (correctness
 identical with refs off — disable via `OPENMAPLE_DISABLE_REFS=1`, a bisection
 switch like `OPENMAPLE_DISABLE_NATIVE`):

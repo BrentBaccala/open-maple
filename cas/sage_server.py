@@ -245,9 +245,108 @@ def _split_top_additive(s):
     return [t.strip() for t in terms if t.strip()]
 
 
+def _split_top_multiplicative(term):
+    """Split one additive term into a list of (separator, factor) pairs at
+    paren-depth 0.
+
+    The separator is the operator that PRECEDES the factor ('' for the first
+    factor, '*' or '/' otherwise). '^' is NOT a separator: a power like x^4 is a
+    single factor (its exponent must stay glued to its base). A '*' or '/'
+    immediately after '^' is also not a top-level separator — that would be
+    inside an exponent grouping — but in practice exponents here are integer
+    literals (x^4), so the simple paren-depth-0 scan suffices.
+
+    Keeping '/' as a separator (rather than folding it into the chain) lets the
+    balancer preserve division's left-association: only maximal runs of '*'
+    factors get reassociated; a '/' always stays a left-deep boundary, so
+    a/b/c is never rewritten to a/(b/c)."""
+    factors = []
+    depth = 0
+    start = 0
+    sep = ''
+    prev = ''  # previous non-space significant char
+    n = len(term)
+    for i, c in enumerate(term):
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c in '*/' and depth == 0 and prev != '^':
+            factors.append((sep, term[start:i].strip()))
+            sep = c
+            start = i + 1
+        if not c.isspace():
+            prev = c
+    factors.append((sep, term[start:].strip()))
+    return [(s, f) for (s, f) in factors if f != '']
+
+
+def _balanced_mult(factors):
+    """Balance a list of multiplicative factor-strings into a binary '*' tree
+    string. Multiplication is associative (exact over QQ), so reassociating a
+    flat product f1*f2*...*fk into a balanced tree is value-preserving while
+    cutting the AST depth handed to compile() from O(k) to O(log k)."""
+    if len(factors) == 1:
+        return factors[0]
+    mid = len(factors) // 2
+    return '(' + _balanced_mult(factors[:mid]) + '*' + _balanced_mult(factors[mid:]) + ')'
+
+
+def _rebalance_term(term):
+    """Rebalance one additive term: balance its top-level multiplicative chain
+    and recurse into any parenthesised sub-expressions.
+
+    A term has no top-level additive operators of its own, but it may be a long
+    flat product (a single monomial with thousands of factors — the combined-
+    hydrogen pseudo-remainders) whose left-deep '*' AST overflows astfold the
+    same way a flat sum does. Split the term at top-level '*'/'/'; rebalance the
+    contents of each factor (so nested parens get balanced); then re-join,
+    reassociating only maximal runs of '*' factors into balanced binary trees
+    (runs are split at every '/' so division stays left-associative — see
+    _split_top_multiplicative)."""
+    pieces = _split_top_multiplicative(term)
+    if len(pieces) == 1:
+        # No top-level multiplication: just balance any parenthesised parts.
+        return _rebalance_parens(pieces[0][1])
+    # Reassociate ONLY maximal runs of '*'-connected factors. A '/' has the same
+    # precedence as '*' and is left-associative, so a/b*c == (a/b)*c but
+    # a/(b*c) != a/b*c: we must never let a balanced group span a '/' boundary.
+    # Strategy: build the result left-to-right; whenever a '/' separator appears,
+    # close off the current '*' run as a balanced group, then continue left-deep
+    # from there. Each '*' run between '/' boundaries (and the leading one) is
+    # balanced independently; the '/'s remain left-deep.
+    out = []          # finished left-deep fragments, joined verbatim
+    run = []          # pending '*'-connected factors to balance together
+
+    def flush():
+        # Append the pending '*' run as a balanced group, multiplied onto any
+        # existing left-deep output. No-op when the run is empty (e.g. two '/'
+        # in a row: a/b/c).
+        if not run:
+            return
+        bal = _balanced_mult(run)
+        if out:
+            out.append('*')
+        out.append(bal)
+        run.clear()
+
+    for sep, fac in pieces:
+        fac = _rebalance_parens(fac)
+        if sep == '/':
+            # close the current '*' run, then emit the '/' boundary left-deep
+            flush()
+            out.append('/')
+            out.append('(' + fac + ')')
+        else:  # '' (leading) or '*'
+            run.append(fac)
+    flush()
+    return ''.join(out)
+
+
 def _rebalance_parens(term):
     """Recursively rebalance the contents of every top-level (...) group inside
-    a single term (a term has no top-level additive operators of its own)."""
+    a single factor (which has no top-level additive or multiplicative
+    operators of its own)."""
     out = []
     i = 0
     n = len(term)
@@ -291,7 +390,7 @@ def rebalance(s):
     args = _split_top_commas(s)
     if len(args) > 1:
         return ','.join(rebalance(a) for a in args)
-    terms = [_rebalance_parens(t) for t in _split_top_additive(s)]
+    terms = [_rebalance_term(t) for t in _split_top_additive(s)]
     return _balanced_join(terms)
 
 
