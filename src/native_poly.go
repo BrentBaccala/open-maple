@@ -319,8 +319,11 @@ func nativeIndets(v Value) (Value, bool) {
 }
 
 // collectFuncIndets gathers every name / indexed / function subterm of v into
-// out (keyed canonically). Numbers/strings/booleans contribute nothing; an
-// unsupported node makes it return false.
+// out (keyed canonically). It recurses through arithmetic (Sum/Prod/Power) and
+// the structural/relational containers indets is routinely called on in a
+// Thomas decomposition — Seq/List/Set, Range, Equation, Relation, Uneval —
+// unioning indets over their components (matches Maple). Numbers/strings/
+// booleans contribute nothing; an unsupported node (Table/Proc/…) returns false.
 func collectFuncIndets(v Value, out map[string]Value) bool {
 	switch n := v.(type) {
 	case Integer, Rational, Float, MString, Boolean:
@@ -352,6 +355,35 @@ func collectFuncIndets(v Value, out map[string]Value) bool {
 		return true
 	case *Power:
 		return collectFuncIndets(n.Base, out) && collectFuncIndets(n.Exp, out)
+	case Seq:
+		for _, it := range n.Items {
+			if !collectFuncIndets(it, out) {
+				return false
+			}
+		}
+		return true
+	case List:
+		for _, it := range n.Items {
+			if !collectFuncIndets(it, out) {
+				return false
+			}
+		}
+		return true
+	case Set:
+		for _, it := range n.Items {
+			if !collectFuncIndets(it, out) {
+				return false
+			}
+		}
+		return true
+	case *Range:
+		return collectFuncIndets(n.Lo, out) && collectFuncIndets(n.Hi, out)
+	case *Equation:
+		return collectFuncIndets(n.Lhs, out) && collectFuncIndets(n.Rhs, out)
+	case *Relation:
+		return collectFuncIndets(n.Lhs, out) && collectFuncIndets(n.Rhs, out)
+	case *Uneval:
+		return collectFuncIndets(n.Expr, out)
 	}
 	return false
 }
