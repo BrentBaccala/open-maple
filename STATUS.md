@@ -324,6 +324,63 @@ restores the old whole-cache clear as a bisection switch. A surviving ref bound
 to a global stays reachable and is never freed; a transient intermediate becomes
 unreachable and is reclaimed.
 
+### Combined-run wall #4: timeout-as-death strands the ref cache (FIXED)
+
+The first full combined-hydrogen run on the ref-arithmetic build (edge, 24 cores)
+got **past** the historical 2h20m `indets` wall but **panicked after 2h34m** with
+`sage add failed: ... unknown expression ref: 292 (cache has 0 entries)`,
+`ncells=0`, Go RSS only **2.07 GB**. The failure was **not** OOM and **not** an
+intrinsic-size limit — it was a bug in the timeout/restart path, triangulated
+from the run artifacts (`/tmp/refarith-time.log`, `/tmp/refarith.done` on edge):
+
+- **Not OOM** — edge's `dmesg` ring buffer (intact back to boot) had zero
+  OOM-kill entries; the Go process peaked at 2.07 GB.
+- **Not a Sage crash** — the merged stderr (Sage's stderr → `os.Stderr`) had no
+  Python traceback and no cysignals SIGSEGV banner. Sage did not die on its own.
+- **The actual chain:** a server-side **`add`** on a multi-MB operand (the
+  `[indets-scan] 21562279 chars` 21.5 MB poly logged just before) ran longer than
+  the **120 s per-call timeout**. `send` (`sage_cas.go`) cannot tell *slow-but-alive*
+  from *dead* — on timeout it set `s.dead=true`. `roundtrip` then treated that as
+  death: it **SIGKILLed the still-computing Sage server**, started a **fresh empty
+  server**, and **resent the same `add` request still carrying `{"ref":292}`** —
+  which the empty cache could not resolve → the misleading `unknown ref / cache 0`
+  panic (the timeout message was swallowed, being the *first* send).
+- **Why the `add` was slow:** once a ref is materialized Go-side (e.g. for the
+  `indets` token-scan band-aid), `encodeArg` sends it as a **string** thereafter,
+  so the subsequent `add` shipped a 21.5 MB string the server had to **re-parse** —
+  the parse, not the polynomial addition, blew the 120 s. (This re-parse of a
+  materialized ref is a residual ping-pong worth closing as a follow-up: keep the
+  ref server-side even after a Go-side materialize.)
+
+**Newly exposed by ref arithmetic:** task 435 moved `add`/`mul`/`neg`/`pow` from
+the **instant native Go path** onto the **Sage round-trip**, putting big-poly
+arithmetic under the 120 s timeout for the first time. The timeout was designed to
+catch a *hung parse* (the old `op=indets` wall); applied to genuine compute on a
+20 MB poly, a slow-but-healthy op is indistinguishable from a hang.
+
+**Fix (this session, `sage_cas.go` + `restart_timeout_test.go`):**
+
+1. **Two-tier, env-tunable timeout.** Compute-heavy ops (`heavyOps`: arithmetic +
+   pseudo-division + `normal`/`numer`/`denom`/`expand`/`factor`/`indets`/`gcd`/…)
+   get `heavyTimeout` (default **1 h**, `OPENMAPLE_SAGE_HEAVY_TIMEOUT` seconds);
+   structural/metadata ops keep the short liveness `timeout` (default 120 s,
+   `OPENMAPLE_SAGE_TIMEOUT`). `0` ⇒ effectively unbounded. The timeout is a
+   *liveness* guard, not a compute budget.
+2. **Honest restart.** A server (re)start bumps `SageBackend.generation`; each
+   `SageRef` records its issue generation. `encodeArg`/`encodeExprlist` **refuse**
+   to send a stale-generation ref, and `roundtrip` **refuses to resend a
+   ref-bearing request** across a restart — both turning the old silent
+   corruption into a clear, non-recoverable error (`ref N lost to a server
+   restart …`). The auto-restart only ever helps a *ref-free* request; for a
+   ref-bearing workload a restart is unrecoverable and now says so.
+
+So the combined frontier is **not** bounded by intrinsic intermediate size as
+previously stated — that conclusion was drawn before this run reached the bug. The
+heavy-op timeout lets the slow `add`/re-parse finish; the honest restart prevents
+any genuine death from masquerading as an unknown-ref panic. Pinned by
+`restart_timeout_test.go` (timeout tiering, env parsing, stale-ref encode guard).
+A re-run of the full combined decomposition is the next validation step.
+
 **Reading the logs.**
 - `[ref-coerce-fallback] op=… ref=N from=<parent ring> to=<target ring> err=…`
   (stderr): a ref's fast-path `R(obj)` coercion into the consuming op's ring

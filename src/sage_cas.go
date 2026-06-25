@@ -39,8 +39,23 @@ type SageBackend struct {
 	debug   bool
 	sageBin string
 	script  string
-	timeout time.Duration
-	dead    bool
+	// timeout bounds an ordinary (cheap/structural) Sage call — it is a LIVENESS
+	// guard to detect a wedged/dead server, not a compute budget. heavyTimeout is
+	// the (much larger) bound for compute-heavy ops on big polynomials (arithmetic,
+	// pseudo-division, normal/factor/expand, indets, …): a slow-but-alive op on a
+	// multi-MB operand is normal, not a hang, and must be allowed to finish. See
+	// timeoutFor / heavyOps. Both are env-overridable (OPENMAPLE_SAGE_TIMEOUT,
+	// OPENMAPLE_SAGE_HEAVY_TIMEOUT, in seconds).
+	timeout      time.Duration
+	heavyTimeout time.Duration
+	dead         bool
+	// generation counts server (re)starts. Each SageRef records the generation it
+	// was issued in; a restart empties the server-side ref cache, so any ref from a
+	// prior generation is permanently invalid (its body is gone). encodeArg refuses
+	// to send a stale-generation ref, and roundtrip refuses to resend a ref-bearing
+	// request across a restart — both turning the old silent "unknown ref / cache 0
+	// entries" corruption into an honest, clearly-labelled error.
+	generation int
 	// useRefs enables the expression-handle optimization: poly/rational results
 	// are kept Sage-side and returned as {"ref":N} handles, materialized to a
 	// string only when the Go side must look inside. On by default; disable with
@@ -76,6 +91,10 @@ type sageRequest struct {
 	Frac    bool              `json:"frac,omitempty"`
 	Debug   bool              `json:"debug,omitempty"`
 	WantRef bool              `json:"want_ref,omitempty"`
+	// hasRef is set (Go-side only, never serialized) when any encoded arg carries a
+	// {"ref":N} handle. roundtrip uses it to refuse resending the request across a
+	// server restart — the fresh server's cache is empty, so the ref is gone.
+	hasRef bool `json:"-"`
 }
 
 type sageResponse struct {
@@ -99,6 +118,7 @@ type sageResponse struct {
 type SageRef struct {
 	be  *SageBackend
 	id  int
+	gen int        // server generation this ref was issued in (see SageBackend.generation)
 	san *sanitizer // the sanitizer in effect when the ref was created (for parseBack)
 
 	once sync.Once
@@ -265,13 +285,64 @@ func newSageBackend() (*SageBackend, error) {
 		return nil, err
 	}
 	b := &SageBackend{
-		sageBin: sageBin,
-		script:  script,
-		debug:   os.Getenv("OPENMAPLE_CAS_DEBUG") != "",
-		timeout: 120 * time.Second,
-		useRefs: os.Getenv("OPENMAPLE_DISABLE_REFS") == "",
+		sageBin:      sageBin,
+		script:       script,
+		debug:        os.Getenv("OPENMAPLE_CAS_DEBUG") != "",
+		timeout:      envDurationSeconds("OPENMAPLE_SAGE_TIMEOUT", 120*time.Second),
+		heavyTimeout: envDurationSeconds("OPENMAPLE_SAGE_HEAVY_TIMEOUT", 3600*time.Second),
+		useRefs:      os.Getenv("OPENMAPLE_DISABLE_REFS") == "",
 	}
 	return b, nil
+}
+
+// envDurationSeconds reads an integer-seconds env var, falling back to def. A
+// value of 0 means "no timeout" (an effectively-unbounded wait), for the user
+// who would rather a genuinely-slow op block than abort.
+func envDurationSeconds(name string, def time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	if n <= 0 {
+		// Effectively unbounded: a very large duration the run will never reach.
+		return time.Duration(1<<62 - 1)
+	}
+	return time.Duration(n) * time.Second
+}
+
+// heavyOps are compute-heavy CAS ops that operate on big polynomials: a slow call
+// here is real work, not a hung server, so it gets heavyTimeout rather than the
+// short liveness timeout. Centered on the server-side arithmetic ops (the ones
+// task 435 moved off the instant native path and onto the Sage round-trip), plus
+// the pseudo-division / normalization / factoring family that the combined
+// no-end-reduction system drives on multi-MB operands. Structural/metadata ops
+// (whattype, type, op, nops, …) are intentionally absent: they must stay snappy,
+// and a hang there is a real bug worth catching fast.
+var heavyOps = map[string]bool{
+	// arithmetic (server-side ref arithmetic — task 435)
+	"add": true, "sub": true, "mul": true, "neg": true, "pow": true,
+	// pseudo-division and division
+	"prem": true, "pquo": true, "sprem": true, "quo": true, "rem": true,
+	// normalization / structure on big polys
+	"normal": true, "numer": true, "denom": true, "expand": true,
+	"simplify": true, "collect": true, "content": true, "primpart": true,
+	"indets": true, "evala": true, "coeff": true, "coeffs": true,
+	"degree": true, "ldegree": true,
+	// gcd / factoring
+	"gcd": true, "lcm": true, "factor": true, "factors": true, "gcdex": true,
+}
+
+// timeoutFor returns the wall budget for one call of op: the generous heavyTimeout
+// for compute-heavy poly ops, the short liveness timeout otherwise.
+func (s *SageBackend) timeoutFor(op string) time.Duration {
+	if heavyOps[op] {
+		return s.heavyTimeout
+	}
+	return s.timeout
 }
 
 // findSageServerScript locates cas/sage_server.py.
@@ -326,6 +397,9 @@ func (s *SageBackend) start() error {
 	s.stdin = stdin
 	s.stdout = bufio.NewReaderSize(stdout, 1<<20)
 	s.dead = false
+	// A (re)start gives a fresh, empty ref cache. Bumping the generation marks
+	// every previously-issued SageRef as stale so it can no longer be sent.
+	s.generation++
 	return nil
 }
 
@@ -479,7 +553,20 @@ func (s *SageBackend) roundtrip(req *sageRequest) (*sageResponse, error) {
 	}
 	resp, err := s.send(req)
 	if err != nil {
-		// one restart attempt
+		// The server is unresponsive (a true death, or a call that blew its
+		// timeout). A ref-bearing request can NEVER be retried: the restart below
+		// gives a fresh, empty ref cache, so resending {"ref":N} would resolve
+		// against an empty cache and fail with the misleading "unknown expression
+		// ref / cache has 0 entries". Fail honestly instead — the run is
+		// unrecoverable once the ref cache is gone. (This is the bug that killed
+		// the combined-hydrogen run after 2h34m: a heavy add timed out, the alive
+		// server was SIGKILLed, and the op was resent to an empty cache.)
+		if req.hasRef {
+			s.dead = true
+			return nil, fmt.Errorf("sage %s carried a server-side ref but the server became unresponsive "+
+				"(%w); the ref cache is lost on restart, so this op is unrecoverable", req.Op, err)
+		}
+		// one restart attempt for a ref-free request (it does not depend on cache)
 		s.dead = true
 		if rerr := s.ensureStarted(); rerr != nil {
 			return nil, fmt.Errorf("sage server died and restart failed: %v (orig: %w)", rerr, err)
@@ -532,9 +619,9 @@ func (s *SageBackend) send(req *sageRequest) (*sageResponse, error) {
 			return nil, fmt.Errorf("bad sage response %q: %w", string(rr.line), err)
 		}
 		return &resp, nil
-	case <-time.After(s.timeout):
+	case <-time.After(s.timeoutFor(req.Op)):
 		s.dead = true
-		return nil, fmt.Errorf("sage call timed out after %s (op=%s)", s.timeout, req.Op)
+		return nil, fmt.Errorf("sage call timed out after %s (op=%s)", s.timeoutFor(req.Op), req.Op)
 	}
 }
 
@@ -575,6 +662,7 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 		frac = true
 	}
 
+	refArgsBefore := s.refArgsSent
 	reqArgs, err := s.encodeArgs(op, member, args, san)
 	if err != nil {
 		return nil, err
@@ -587,6 +675,10 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 		Args:    reqArgs,
 		Frac:    frac,
 		WantRef: s.useRefs,
+		// A ref-bearing request cannot survive a server restart (the fresh cache is
+		// empty), so roundtrip must not blindly resend it. encodeArg bumps
+		// refArgsSent for each {"ref":N} it emits.
+		hasRef: s.refArgsSent > refArgsBefore,
 	}
 
 	resp, err := s.roundtrip(req)
@@ -707,6 +799,10 @@ func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMes
 		if mv, ok := n.materialized(); ok {
 			return s.encodeArg(op, mv, san)
 		}
+		if n.gen != s.generation {
+			return nil, fmt.Errorf("sage ref %d lost to a server restart (issued in generation %d, now %d); "+
+				"the server-side ref cache was emptied and this expression is unrecoverable", n.id, n.gen, s.generation)
+		}
 		s.refArgsSent++
 		return json.Marshal(map[string]int{"ref": n.id})
 	case Integer:
@@ -752,6 +848,10 @@ func (s *SageBackend) encodeExprlist(items []Value, san *sanitizer) (json.RawMes
 	for i, it := range items {
 		if ref, ok := it.(*SageRef); ok {
 			if _, materialized := ref.materialized(); !materialized {
+				if ref.gen != s.generation {
+					return nil, fmt.Errorf("sage ref %d lost to a server restart (issued in generation %d, now %d); "+
+						"the server-side ref cache was emptied and this expression is unrecoverable", ref.id, ref.gen, s.generation)
+				}
 				s.refArgsSent++
 				b, err := json.Marshal(map[string]int{"ref": ref.id})
 				if err != nil {
@@ -820,8 +920,9 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		}
 		s.mu.Lock()
 		s.refsIssued++
+		gen := s.generation
 		s.mu.Unlock()
-		ref := &SageRef{be: s, id: id, san: san}
+		ref := &SageRef{be: s, id: id, gen: gen, san: san}
 		// Per-ref lifecycle: when this Go handle becomes unreachable, free its
 		// server-side cache entry so the cache stays bounded to exactly the live
 		// Go refs — no statement-boundary materialize-all. The finalizer only
