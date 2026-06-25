@@ -682,9 +682,15 @@ def _map_structure(req, op_fn):
     vars = req.get("vars", [])
     if "exprlist" in a:
         # list/set: map over elements (the list-vs-set distinction is not carried
-        # on the wire, so the result comes back as a list).
-        return enc_list([op_fn({"vars": vars, "args": [{"poly": s}]})
-                         for s in a["exprlist"]])
+        # on the wire, so the result comes back as a list). An element may be a
+        # live {"ref":N} handle (preserved by encodeExprlist for swollen
+        # intermediates) — pass it straight through so the op runs on the cached
+        # object rather than a re-parsed multi-MB string.
+        out = []
+        for el in a["exprlist"]:
+            arg = el if isinstance(el, dict) else {"poly": el}
+            out.append(op_fn({"vars": vars, "args": [arg]}))
+        return enc_list(out)
     if "poly" in a:
         split = _split_relation(a["poly"])
         if split is not None:
@@ -957,6 +963,23 @@ def op_collect(req):
     return enc_poly(p)  # ring elements already collected
 
 
+def _obj_variables(obj):
+    """Indeterminates of a cached ring element. A polynomial has .variables(); a
+    FractionFieldElement does NOT (it raises AttributeError) — union the
+    numerator's and denominator's variables. This reads straight off the cached
+    object, with no string round-trip or re-parse."""
+    try:
+        return set(obj.variables())
+    except AttributeError:
+        try:
+            return (set(obj.numerator().variables())
+                    | set(obj.denominator().variables()))
+        except Exception:
+            return set()
+    except Exception:
+        return set()
+
+
 def op_indets(req):
     R = make_ring(req["vars"])
     a = req["args"][0]
@@ -969,17 +992,16 @@ def op_indets(req):
         except Exception:
             return set()
     if "exprlist" in a:
-        for s in a["exprlist"]:
-            vs |= vars_of(s)
+        for el in a["exprlist"]:
+            if isinstance(el, dict) and "ref" in el:
+                # live ref element: read variables off the cached object, never
+                # re-parse a stringified (possibly multi-MB) swollen polynomial.
+                vs |= _obj_variables(cache_get(el["ref"]))
+            else:
+                vs |= vars_of(el)
     elif "ref" in a:
         # A cached object already lives in a ring: read its variables directly.
-        obj = cache_get(a["ref"])
-        try:
-            vs = set(obj.variables())
-        except AttributeError:
-            vs = set()
-        except Exception:
-            vs = vars_of(str(obj))
+        vs = _obj_variables(cache_get(a["ref"]))
     else:
         s = a.get("poly", a.get("name", a.get("int", "")))
         vs = vars_of(str(s))

@@ -645,24 +645,48 @@ func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMes
 			return s.encodeVector(n.Items, san)
 		}
 		// a Maple list of expressions (e.g. indets([p1, p2]), coeffs over a
-		// list): send each element's string form.
-		strs := make([]string, len(n.Items))
-		for i, it := range n.Items {
-			strs[i] = san.sanitizeExpr(it)
-		}
-		return json.Marshal(map[string][]string{"exprlist": strs})
+		// list): send each element by-reference when it is a live SageRef.
+		return s.encodeExprlist(n.Items, san)
 	case Set:
-		strs := make([]string, len(n.Items))
-		for i, it := range n.Items {
-			strs[i] = san.sanitizeExpr(it)
-		}
-		return json.Marshal(map[string][]string{"exprlist": strs})
+		return s.encodeExprlist(n.Items, san)
 	default:
 		// polynomial / rational / symbolic expression -> sanitized string
 		str := san.sanitizeExpr(v)
 		s.polyArgsSent++
 		return json.Marshal(map[string]string{"poly": str})
 	}
+}
+
+// encodeExprlist serializes a Maple list/set of expressions for the wire as
+// {"exprlist": [elem, ...]} where each elem is normally a sanitized string but
+// a LIVE SageRef is kept as a {"ref":N} handle. Materializing + stringifying a
+// swollen server-side ref into the list is what made indets([... bigpoly ...])
+// re-parse a multi-MB string and blow the 120 s sage-call timeout; sending the
+// ref keeps the element server-side so the handler reads it from the cache.
+// (Mirrors the top-level SageRef policy in encodeArg: a ref whose handle may
+// have been cleared at a statement boundary — materialized() true — is sent as
+// its concrete string instead, to avoid a stale-handle cache miss.)
+func (s *SageBackend) encodeExprlist(items []Value, san *sanitizer) (json.RawMessage, error) {
+	elems := make([]json.RawMessage, len(items))
+	for i, it := range items {
+		if ref, ok := it.(*SageRef); ok {
+			if _, materialized := ref.materialized(); !materialized {
+				s.refArgsSent++
+				b, err := json.Marshal(map[string]int{"ref": ref.id})
+				if err != nil {
+					return nil, err
+				}
+				elems[i] = b
+				continue
+			}
+		}
+		b, err := json.Marshal(san.sanitizeExpr(it))
+		if err != nil {
+			return nil, err
+		}
+		elems[i] = b
+	}
+	return json.Marshal(map[string][]json.RawMessage{"exprlist": elems})
 }
 
 func isMatrixList(l List) bool {

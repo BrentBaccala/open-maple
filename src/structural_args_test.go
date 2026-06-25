@@ -42,3 +42,32 @@ func TestStructuralArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestIndetsArgForms pins indets across the argument forms DT actually uses:
+// a single polynomial, a rational function (fraction-field — the case whose
+// .variables() raises AttributeError, previously yielding an empty/wrong set),
+// and a list of expressions (the form that — when an element is a swollen
+// server-side ref — used to be stringified and re-parsed into a 120 s timeout;
+// now the ref is read off the cache via _obj_variables). Sage-gated.
+func TestIndetsArgForms(t *testing.T) {
+	if os.Getenv("OPENMAPLE_CAS") != "sage" {
+		t.Skip("set OPENMAPLE_CAS=sage to run the Sage-backed indets test")
+	}
+	it := NewInterp()
+	cases := []struct{ expr, want string }{
+		{"indets(x^2*y + z);", "{x, y, z}"},
+		// rational function: numerator and denominator variables (the frac bug).
+		{"indets((x + 1)/(y - 1));", "{x, y}"},
+		// list of expressions: union over elements.
+		{"indets([x*y, (z + 1)/w]);", "{w, x, y, z}"},
+	}
+	for _, c := range cases {
+		v, err := it.Exec(c.expr)
+		if err != nil {
+			t.Fatalf("%s err: %v", c.expr, err)
+		}
+		if got := printValue(v); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.expr, got, c.want)
+		}
+	}
+}
