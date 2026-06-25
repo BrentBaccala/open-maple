@@ -65,6 +65,7 @@
 
 from __future__ import print_function
 import sys
+import re
 import json
 import traceback
 
@@ -980,11 +981,35 @@ def _obj_variables(obj):
         return set()
 
 
+# Strings at or above this length take the token-scan path in op_indets instead
+# of being parsed. Parsing (sage_eval -> compile) a multi-MB expanded polynomial
+# sum is the op=indets wall (it blew the 120 s sage-call timeout on the combined
+# hydrogen run); the scan is O(len). Small strings stay on the exact parse path.
+_INDETS_SCAN_THRESHOLD = 100000
+
+
 def op_indets(req):
     R = make_ring(req["vars"])
     a = req["args"][0]
+    gens = {str(g): g for g in R.gens()}
+    # longest names first so the alternation prefers u_1_0 over a prefix u; \b
+    # anchors whole-token matches (u_1_0 in "xu_1_00" does not match).
+    gen_re = (re.compile(r"\b(?:%s)\b"
+                         % "|".join(re.escape(n) for n in
+                                    sorted(gens, key=len, reverse=True)))
+              if gens else None)
     vs = set()
     def vars_of(s):
+        # indets of a polynomial = the ring generators that appear in it. For a
+        # big expanded string, scan for generator-name tokens rather than PARSE
+        # the polynomial: parse_in_ring (sage_eval -> compile) on a multi-MB sum
+        # is the op=indets timeout, and .variables() on the parsed result is not
+        # even the cost. The scan is exact for an expanded/normal-form string
+        # (an appearing generator is a variable). Small strings keep the exact
+        # parse path, so nothing changes for the common case.
+        if gen_re is not None and len(s) >= _INDETS_SCAN_THRESHOLD:
+            sys.stderr.write("[indets-scan] %d chars\n" % len(s))
+            return {gens[n] for n in set(gen_re.findall(s))}
         try:
             return set(R(parse_in_ring(s, R)).variables())
         except AttributeError:
