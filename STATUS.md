@@ -291,16 +291,38 @@ switch like `OPENMAPLE_DISABLE_NATIVE`):
   cached and fed back. Only genuine polynomial/rational ring elements become
   refs (`enc_poly` / `_is_symbolic_ring_elt` in `sage_server.py`).
 
-**Where `clear` is emitted.** The cache has **no automatic eviction**, so it
-must be dropped at a coarse boundary. There is no Go-visible per-cell seam inside
-DT's decomposition (the cells are produced by the LGPL Maple source running
-through the interpreter), so the clear fires at the **end of each top-level
-program statement** (`Interp.ExecProgram` in `interp.go`, used by `runFile`).
-Before each clear, every `SageRef` still reachable from the globals and the ditto
-history is **deep-materialized** (`materializeLiveRefs`/`materializeDeep`), so a
-handle that survives the statement already holds its concrete value in Go and
-clearing the server-side cache can never strand it. (A subsequent `encodeArg` of
-an already-materialized ref sends its string, not the now-stale handle.)
+**Server-side ref arithmetic (keep big polys Sage-side through `+ - * neg ^`).**
+A big polynomial that was a Sage result (a ref) used to be pulled BACK into Go by
+the interpreter's native arithmetic (`eval_ops.go` `concrete()`), then
+re-serialized on the next Sage op — a materialize/re-stringify ping-pong that
+re-parsed a multi-MB string and blew the combined-hydrogen `indets` 2 m wall.
+Fix: Sage ops `add`/`sub`/`mul`/`neg`/`pow` (`sage_server.py`), and Go dispatch
+(`arithAdd`/`arithMul`/`neg`/`arithPow`/`arithDiv`) that routes to Sage **only
+when an operand is a live `*SageRef`** — both-inline operands stay on the fast
+native path (no round-trip), since hydrogen is interpreter-CPU-bound and
+round-tripping every tiny op would be catastrophic. A ref is a big server-side
+poly (few); inline values are tiny (many); the boundary self-maintains.
+
+**Size-gated result encoding.** `enc_poly` refs a result ONLY when it is a
+genuine multi-term polynomial at/above `_REF_TERM_THRESHOLD` (default 64,
+`OPENMAPLE_REF_TERMS`). Constants → `{"int"}`/`{"poly"}` inline; small polys →
+`{"poly"}` inline. Size is measured CHEAPLY (`is_constant()` /
+`number_of_terms()` — never `str()`, the cost being avoided on swollen polys), so
+refing a `5` no longer burns a cache entry the Go side materializes straight
+back. (ex1–ex3 issue 0 refs — every intermediate is below threshold — confirming
+the gate does not over-cache.)
+
+**Per-ref lifecycle (bounded cache without materialize-all).** The cache has
+**no automatic eviction**. Each `SageRef` carries a `runtime.SetFinalizer` that,
+when the Go handle is GC'd, queues a server-side `clear[id]`; the queue is
+batch-drained at the top of every roundtrip and at each top-level statement
+boundary (after a forced `runtime.GC()`), so the cache tracks exactly the live Go
+refs. This **replaces** the old `materializeLiveRefs` + whole-cache `ClearCache`,
+which re-materialized every surviving big poly at each statement boundary — the
+exact ping-pong the arithmetic change removes. `OPENMAPLE_REF_COARSE_CLEAR=1`
+restores the old whole-cache clear as a bisection switch. A surviving ref bound
+to a global stays reachable and is never freed; a transient intermediate becomes
+unreachable and is reclaimed.
 
 **Reading the logs.**
 - `[ref-coerce-fallback] op=… ref=N from=<parent ring> to=<target ring> err=…`
