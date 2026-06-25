@@ -11,12 +11,22 @@ type CAS interface {
 }
 
 // cacheClearer is implemented by a CAS backend that keeps an expression-handle
-// cache (the Sage backend). The interpreter driver calls ClearCache at coarse
-// boundaries (between top-level decomposition statements) so the no-eviction
-// ref cache cannot grow without bound on a long run. Backends without a cache
-// don't implement it and the clear is simply skipped.
+// cache (the Sage backend). ClearCache drops the ENTIRE cache; it is the coarse
+// fallback used by OPENMAPLE_REF_COARSE_CLEAR=1 (a bisection switch back to the
+// old whole-cache statement-boundary clear). The default path is per-ref freeing
+// via pendingFreer.
 type cacheClearer interface {
 	ClearCache() error
+}
+
+// pendingFreer is implemented by a CAS backend with per-ref lifecycle: a ref
+// whose Go handle is GC'd is queued for a server-side free, and drainPendingFree
+// flushes that queue. The interpreter driver drains it at top-level statement
+// boundaries (after forcing a GC) so the server cache tracks exactly the live Go
+// refs without ever materializing surviving handles. Backends without a ref
+// cache don't implement it and the drain is skipped.
+type pendingFreer interface {
+	drainPendingFree()
 }
 
 // errCASUnimplemented is the explicit signal that a computer-algebra op was

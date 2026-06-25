@@ -101,7 +101,43 @@ func (it *Interp) compose(f, g Value) Value {
 	}
 }
 
+// hasRefOperand reports whether any of the operands is a live (not-yet-
+// materialized) *SageRef. A ref is a big server-side polynomial; arithmetic on
+// one is dispatched to the Sage backend so the body stays Sage-side rather than
+// being materialized into Go and re-serialized on the next op. A ref whose
+// handle was already materialized is NOT counted: its value is in Go already, so
+// the native path is cheaper and avoids a stale-handle round-trip.
+func hasRefOperand(vs ...Value) bool {
+	for _, v := range vs {
+		if r, ok := v.(*SageRef); ok {
+			if _, done := r.materialized(); !done {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// casArith dispatches a server-side arithmetic op (add/sub/mul/neg/pow) to the
+// CAS backend and returns its (possibly ref) result. Only called when an operand
+// is a live SageRef, which can only exist with the Sage backend — so it.cas is a
+// *SageBackend and Call routes to op_add/.../op_pow. A backend error surfaces as
+// a maple-error panic (the same contract concrete() uses for a failed
+// materialize): an arithmetic round-trip that fails server-side is not silently
+// recoverable.
+func (it *Interp) casArith(op string, args ...Value) Value {
+	v, err := it.cas.Call(op, args)
+	if err != nil {
+		panic(newMapleError("sage " + op + " failed: " + err.Error()))
+	}
+	return v
+}
+
 func (it *Interp) neg(v Value) Value {
+	// A live ref operand: negate server-side, keeping the body Sage-side.
+	if hasRefOperand(v) {
+		return it.casArith("neg", v)
+	}
 	v = concrete(v)
 	switch n := v.(type) {
 	case Integer:
@@ -122,8 +158,13 @@ func (it *Interp) neg(v Value) Value {
 }
 
 func (it *Interp) arithAdd(a, b Value) (Value, error) {
-	// Arithmetic is performed natively in Go on the value AST, so a ref operand
-	// must be materialized first (it cannot be left as an opaque term).
+	// If either operand is a live server-side ref (a big polynomial), do the add
+	// in Sage and return a (possibly ref) handle — the body never crosses the
+	// wire. Small inline values keep the native path below (no round-trip).
+	if hasRefOperand(a, b) {
+		return it.casArith("add", a, b), nil
+	}
+	// Otherwise arithmetic is performed natively in Go on the value AST.
 	a, b = concrete(a), concrete(b)
 	if r, ok := numAdd(a, b); ok {
 		return r, nil
@@ -151,6 +192,9 @@ func (it *Interp) arithAdd(a, b Value) (Value, error) {
 }
 
 func (it *Interp) arithMul(a, b Value) (Value, error) {
+	if hasRefOperand(a, b) {
+		return it.casArith("mul", a, b), nil
+	}
 	a, b = concrete(a), concrete(b)
 	if r, ok := numMul(a, b); ok {
 		return r, nil
@@ -196,6 +240,16 @@ func (it *Interp) scaleList(l List, s Value) (Value, error) {
 }
 
 func (it *Interp) arithDiv(a, b Value) (Value, error) {
+	// A live ref operand stays server-side: compute a * b^(-1) through the
+	// ref-aware arithPow/arithMul (which dispatch to Sage), so neither a big
+	// numerator nor a big denominator is materialized just to divide.
+	if hasRefOperand(a, b) {
+		inv, err := it.arithPow(b, newInt(-1))
+		if err != nil {
+			return nil, err
+		}
+		return it.arithMul(a, inv)
+	}
 	a, b = concrete(a), concrete(b)
 	if ra, ok := toRat(a); ok {
 		if rb, ok := toRat(b); ok {
@@ -211,6 +265,16 @@ func (it *Interp) arithDiv(a, b Value) (Value, error) {
 }
 
 func (it *Interp) arithPow(a, b Value) (Value, error) {
+	// A live ref base raised to a concrete integer exponent: power server-side so
+	// the (large) base never crosses the wire. The exponent is materialized to an
+	// integer first (op_pow needs an int exponent); a non-integer exponent falls
+	// through to the native symbolic Power below.
+	if hasRefOperand(a) {
+		be := concrete(b)
+		if _, ok := be.(Integer); ok {
+			return it.casArith("pow", a, be), nil
+		}
+	}
 	a, b = concrete(a), concrete(b)
 	if ai, ok := a.(Integer); ok {
 		if bi, ok := b.(Integer); ok {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -130,23 +131,36 @@ func (it *Interp) Exec(code string) (Value, error) {
 	return it.execBlock(root.nodes)
 }
 
-// ExecProgram runs a top-level program statement by statement, dropping the CAS
-// expression-handle cache between top-level statements so the no-eviction cache
-// cannot grow without bound across a long run (e.g. the combined hydrogen run).
+// ExecProgram runs a top-level program statement by statement, bounding the CAS
+// expression-handle cache across a long run (e.g. the combined hydrogen run).
 //
-// This is the chosen "clear escape hatch" seam: there is no Go-visible per-cell
-// boundary inside DT's decomposition (the cells are produced by the LGPL Maple
-// source running through the interpreter), so we clear at the coarsest safe
-// boundary — the end of each top-level statement, which is where one
-// decomposition / save / print closes out before the next begins. Before each
-// clear we DEEP-MATERIALIZE every SageRef still reachable from the globals and
-// the ditto history, so any handle that survives the statement already holds its
-// concrete value in Go and clearing the server-side cache cannot strand it.
+// Per-ref lifecycle (the server-side-arithmetic design): every SageRef carries a
+// finalizer that frees its server-side cache entry when the Go handle becomes
+// unreachable, so the cache tracks exactly the live Go refs — no statement-
+// boundary materialize-all (which used to pull every surviving big polynomial
+// back into Go and re-stringify it on the next op, the very ping-pong this design
+// eliminates). A surviving ref bound to a global stays reachable and is NOT
+// freed; an intermediate ref that no statement keeps becomes unreachable and is
+// reclaimed.
+//
+// Go's GC does not see the (server-side) size of a ref's polynomial — a SageRef
+// is a tiny Go object — so collection can lag and let the server cache grow. To
+// bound it promptly we force a GC at each top-level statement boundary (the
+// coarsest Go-visible seam; DT's per-cell boundaries are inside the LGPL Maple
+// source and not Go-visible), then drain the finalizer free-queue so the dead
+// ids are cleared server-side before the next statement runs. This is the same
+// boundary the old materialize-all used, but it materializes NOTHING — survivors
+// stay refs.
 func (it *Interp) ExecProgram(code string) (Value, error) {
 	root, err := frontEnd(code)
 	if err != nil {
 		return nil, err
 	}
+	freer, _ := it.cas.(pendingFreer)
+	// OPENMAPLE_REF_COARSE_CLEAR=1 is the bisection switch back to the old
+	// whole-cache statement-boundary clear (materialize every surviving ref, then
+	// drop the entire cache). Default is the per-ref lifecycle below.
+	coarse := os.Getenv("OPENMAPLE_REF_COARSE_CLEAR") != ""
 	cc, _ := it.cas.(cacheClearer)
 	var last Value = NULL()
 	for _, s := range root.nodes {
@@ -156,11 +170,20 @@ func (it *Interp) ExecProgram(code string) (Value, error) {
 		}
 		last = v
 		it.pushHistory(v)
-		if cc != nil {
+		if coarse && cc != nil {
 			it.materializeLiveRefs()
 			if cerr := cc.ClearCache(); cerr != nil {
 				return last, cerr
 			}
+			continue
+		}
+		if freer != nil {
+			// Reclaim refs no surviving statement holds, then clear their
+			// server-side ids. Run GC twice so finalizers queued by the first GC
+			// (which then become unreachable themselves) are also collected.
+			runtime.GC()
+			runtime.GC()
+			freer.drainPendingFree()
 		}
 	}
 	return last, nil
@@ -168,8 +191,9 @@ func (it *Interp) ExecProgram(code string) (Value, error) {
 
 // materializeLiveRefs forces every SageRef reachable from the surviving
 // interpreter state (globals + ditto history) to its concrete value, so a
-// subsequent ClearCache cannot strand a still-referenced handle. Materialization
-// is idempotent (sync.Once) and cached on each ref.
+// subsequent whole-cache ClearCache cannot strand a still-referenced handle.
+// Used only by the OPENMAPLE_REF_COARSE_CLEAR bisection path; the default per-ref
+// lifecycle never materializes survivors. Idempotent (sync.Once on each ref).
 func (it *Interp) materializeLiveRefs() {
 	seen := map[Value]bool{}
 	for _, v := range it.globals {

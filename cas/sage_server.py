@@ -585,13 +585,99 @@ def _is_symbolic_ring_elt(p):
         return False
 
 
+# A poly/rational result is only worth keeping Sage-side as a {"ref":N} handle
+# when it is *genuinely large*: a scalar or small polynomial is cheap to ship as
+# a string, and refing it (a) burns a cache entry the Go side immediately
+# materializes back, and (b) defeats the size-gate's whole purpose of bounding the
+# live cache. Threshold is in NUMBER OF TERMS — read with number_of_terms()
+# (libsingular: O(1)-ish, reads the term count; it does NOT stringify the poly,
+# which is the very cost we are avoiding on the swollen intermediates). A poly at
+# or above this many terms refs; below, it comes back inline.
+#
+# Picked at 64: the combined-hydrogen swell intermediates run to 10^4-10^5 terms
+# (the 494k-term / 11.7 MB poly that blew the indets wall is ~4 orders above it),
+# while ordinary DT leaders/coefficients are a handful of terms. 64 sits well
+# clear of both — small enough that every swollen intermediate refs, large enough
+# that the routine small results stay inline. Tunable via OPENMAPLE_REF_TERMS.
+import os as _os
+_REF_TERM_THRESHOLD = int(_os.environ.get("OPENMAPLE_REF_TERMS", "64"))
+
+
+def _ref_worthy(p):
+    """Cheap structural test: is p a genuine multi-term polynomial big enough to
+    be worth keeping Sage-side as a ref? Uses term-count / constant predicates;
+    NEVER str()s p (that is the cost being avoided on the big intermediates).
+
+    Returns the inline encoding to use when NOT ref-worthy, or None when p should
+    be refed. A constant collapses to {"int"} / {"poly"} inline; a small poly to
+    {"poly"} inline; only a poly at/above the term threshold (or any value whose
+    size we cannot cheaply judge, conservatively refed) returns None."""
+    # Constant polynomial: hand back an exact int when integral, else a short
+    # string. is_constant() is cheap (a degree probe), so this short-circuits
+    # before the (more expensive on a big poly) membership tests below.
+    has_is_constant = hasattr(p, "is_constant")
+    if has_is_constant:
+        try:
+            if p.is_constant():
+                c = p.constant_coefficient() if hasattr(p, "constant_coefficient") else p
+                try:
+                    if c in ZZ:
+                        return {"int": str(ZZ(c))}
+                except Exception:
+                    pass
+                return {"poly": str(p)}
+        except (AttributeError, TypeError):
+            pass
+    else:
+        # No .is_constant(): a bare ZZ/QQ scalar (an {"int"} operand that survived
+        # as a Sage Integer/Rational). The membership test is only cheap because
+        # there is no polynomial structure here. Integers -> {"int"}, rationals ->
+        # a short string.
+        try:
+            if p in ZZ:
+                return {"int": str(ZZ(p))}
+            if p in QQ:
+                return {"poly": str(p)}
+        except (TypeError, ValueError):
+            pass
+    # Fraction-field elements: judge by numerator term count (the denominator of a
+    # DT intermediate is small). If we cannot read a term count, conservatively ref
+    # (the unknown-size case is exactly the swollen one we must not stringify).
+    try:
+        if hasattr(p, "numerator") and hasattr(p, "denominator") and not hasattr(p, "number_of_terms"):
+            num = p.numerator()
+            den = p.denominator()
+            nt = (num.number_of_terms() if hasattr(num, "number_of_terms") else 1)
+            dt = (den.number_of_terms() if hasattr(den, "number_of_terms") else 1)
+            if nt + dt < _REF_TERM_THRESHOLD:
+                return {"poly": str(p)}
+            return None
+    except Exception:
+        return None
+    # Plain polynomial: gate on number_of_terms (cheap, no stringify).
+    try:
+        nt = p.number_of_terms()
+    except (AttributeError, TypeError):
+        # No cheap size probe available — conservatively ref so we never
+        # accidentally stringify a swollen value here.
+        return None
+    if nt < _REF_TERM_THRESHOLD:
+        return {"poly": str(p)}
+    return None
+
+
 def enc_poly(p):
     """Encode a single poly/rational result. Returns a {"ref": N} handle when the
-    request asked for one (want_ref) AND the result is a genuine polynomial /
-    rational ring element; SR (symbolic) results are always returned as strings
-    (see _is_symbolic_ring_elt)."""
+    request asked for one (want_ref) AND the result is a genuine, *large* polynomial
+    / rational ring element (see _ref_worthy). Constants and small polynomials are
+    returned inline even under want_ref — refing them just burns a cache entry the
+    Go side materializes straight back. SR (symbolic) results are always returned
+    as strings (see _is_symbolic_ring_elt)."""
     if _WANT_REF[0] and not _is_symbolic_ring_elt(p):
-        return {"ref": cache_put(p)}
+        inline = _ref_worthy(p)
+        if inline is None:
+            return {"ref": cache_put(p)}
+        return inline
     return {"poly": str(p)}
 
 
@@ -1522,6 +1608,86 @@ def op_la(req):
     raise ValueError("LinearAlgebra member not implemented: %s" % member)
 
 
+# --- server-side arithmetic on refs ----------------------------------------
+#
+# add/sub/mul/neg/pow let a big polynomial flow THROUGH arithmetic as a handle:
+# the Go interpreter dispatches an arithmetic op here whenever an operand is a
+# live ref (a big server-side poly), so the body never crosses the wire and the
+# swollen intermediates stay Sage-side instead of being materialized + re-parsed
+# on the next op. The result goes through the size-gated enc_poly, so a small or
+# constant result still comes back inline (not refed).
+#
+# Build over the fraction field so a rational operand (a ref to a normal/numer/
+# denom result) survives; demote a unit-denominator result back to the polynomial
+# ring before encoding so enc_poly's cheap number_of_terms gate applies to the
+# polynomial case (and the common all-polynomial chain never carries a spurious
+# /1 denominator).
+
+def _arith_decode(req):
+    """Decode every arg of an arithmetic op into a common ring (the fraction
+    field over the request vars, so polynomials and fractions coexist)."""
+    F = make_ring(req["vars"], frac=True)
+    return [decode_arg(a, F) for a in req["args"]], F
+
+
+def _arith_enc(v):
+    """Encode an arithmetic result: demote a unit-denominator fraction back to its
+    polynomial-ring numerator so the polynomial term-count gate applies, then run
+    the size-gated encoder."""
+    try:
+        if hasattr(v, "denominator") and v.denominator() == 1:
+            v = v.numerator()
+    except (AttributeError, TypeError):
+        pass
+    return enc_poly(v)
+
+
+def op_add(req):
+    vals, _F = _arith_decode(req)
+    acc = vals[0]
+    for v in vals[1:]:
+        acc = acc + v
+    return _arith_enc(acc)
+
+
+def op_sub(req):
+    vals, _F = _arith_decode(req)
+    if len(vals) == 1:
+        return _arith_enc(-vals[0])
+    acc = vals[0]
+    for v in vals[1:]:
+        acc = acc - v
+    return _arith_enc(acc)
+
+
+def op_mul(req):
+    vals, _F = _arith_decode(req)
+    acc = vals[0]
+    for v in vals[1:]:
+        acc = acc * v
+    return _arith_enc(acc)
+
+
+def op_neg(req):
+    vals, _F = _arith_decode(req)
+    return _arith_enc(-vals[0])
+
+
+def op_pow(req):
+    """pow(base, e) — e a non-negative integer (poly^int). A negative exponent
+    yields a fraction-field element, which the fraction-field ring handles."""
+    F = make_ring(req["vars"], frac=True)
+    base = decode_arg(req["args"][0], F)
+    e_arg = req["args"][1]
+    if "int" in e_arg:
+        e = int(e_arg["int"])
+    else:
+        # an exponent that came through as a poly/ref must reduce to an integer.
+        ev = decode_arg(e_arg, F)
+        e = int(ev)
+    return _arith_enc(base ** e)
+
+
 # --- deferred --------------------------------------------------------------
 
 def op_materialize(req):
@@ -1590,6 +1756,12 @@ OPS = {
     # explicitly deferred tower-RootOf path
     "AFactors": op_deferred,
     "evala": op_simplify,
+    # server-side arithmetic on refs (keep big polys Sage-side through + - * neg ^)
+    "add": op_add,
+    "sub": op_sub,
+    "mul": op_mul,
+    "neg": op_neg,
+    "pow": op_pow,
     # CAS expression handles
     "materialize": op_materialize,
     "clear": op_clear,

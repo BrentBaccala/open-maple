@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +54,16 @@ type SageBackend struct {
 	refsMaterialized int
 	refArgsSent     int
 	polyArgsSent    int
+	refsFreed       int
+
+	// pendingFree collects the server-side ids of SageRefs whose Go handle has
+	// been garbage-collected (their finalizer ran). They are batch-cleared from
+	// the server cache on the next roundtrip — see flushPendingFree. A finalizer
+	// must not itself do a blocking round-trip (it runs on the GC's finalizer
+	// goroutine and could deadlock against an in-flight call holding s.mu), so it
+	// only appends here under freeMu, and the next ordinary call drains the batch.
+	freeMu      sync.Mutex
+	pendingFree []int
 }
 
 // sageRequest / sageResponse are the wire types.
@@ -352,6 +363,70 @@ func (s *SageBackend) ClearCache() error {
 	return nil
 }
 
+// scheduleFree records that the SageRef with this server-side id is no longer
+// reachable in Go (its finalizer ran). The id is freed from the server cache on
+// the next roundtrip (flushPendingFree), batching frees so a GC sweep that
+// finalizes many refs costs one clear, not one per ref. Safe to call from the
+// finalizer goroutine: it only appends under freeMu and never blocks on a
+// round-trip. A ref whose value was already materialized still owns its
+// server-side cache entry, so we free it the same way.
+func (s *SageBackend) scheduleFree(id int) {
+	if !s.useRefs {
+		return
+	}
+	s.freeMu.Lock()
+	s.pendingFree = append(s.pendingFree, id)
+	s.freeMu.Unlock()
+}
+
+// flushPendingFree sends a single clear[id...] for every id queued by a
+// finalizer since the last flush. Called at the top of roundtrip (under s.mu),
+// so the server cache tracks exactly the live Go refs without ever
+// materializing. It builds its own request and writes/reads directly via send so
+// it does not recurse into roundtrip (and is already under s.mu).
+func (s *SageBackend) flushPendingFree() {
+	s.freeMu.Lock()
+	ids := s.pendingFree
+	s.pendingFree = nil
+	s.freeMu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	args := make([]json.RawMessage, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, json.RawMessage(fmt.Sprintf(`{"ref":%d}`, id)))
+	}
+	req := &sageRequest{Op: "clear", Args: args}
+	// Best-effort: a failed free leaks one cache entry but is not a correctness
+	// problem, so we do not propagate the error up through the caller's op.
+	if _, err := s.send(req); err != nil {
+		s.dead = true
+	} else {
+		s.refsFreed += len(ids)
+	}
+}
+
+// drainPendingFree flushes the finalizer free-queue from outside a roundtrip
+// (the statement-boundary drain in ExecProgram). It acquires s.mu and only
+// flushes when the server is alive — a freed id no longer exists after a restart
+// anyway. No-op when refs are off.
+func (s *SageBackend) drainPendingFree() {
+	if !s.useRefs {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd == nil || s.dead {
+		// Nothing started yet, or dead: drop the queue (the ids do not exist
+		// server-side). Clear it so it cannot grow unbounded.
+		s.freeMu.Lock()
+		s.pendingFree = nil
+		s.freeMu.Unlock()
+		return
+	}
+	s.flushPendingFree()
+}
+
 // reportRefStats prints a one-line summary of the expression-handle traffic for
 // the run (to stderr), so the example-suite runner and a human can see refs'
 // effect: how many result handles were issued, how many had to be materialized,
@@ -364,8 +439,8 @@ func (it *Interp) reportRefStats() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(stderrW(),
-		"[ref-stats] issued=%d materialized=%d ref-args=%d poly-args=%d\n",
-		s.refsIssued, s.refsMaterialized, s.refArgsSent, s.polyArgsSent)
+		"[ref-stats] issued=%d materialized=%d freed=%d ref-args=%d poly-args=%d\n",
+		s.refsIssued, s.refsMaterialized, s.refsFreed, s.refArgsSent, s.polyArgsSent)
 }
 
 // Close terminates the subprocess.
@@ -395,6 +470,12 @@ func (s *SageBackend) roundtrip(req *sageRequest) (*sageResponse, error) {
 
 	if err := s.ensureStarted(); err != nil {
 		return nil, err
+	}
+	// Free any refs whose Go handle has been GC'd since the last call, so the
+	// server cache tracks exactly the live Go refs. Skipped right after a restart
+	// (the cache is empty, so the freed ids no longer exist — harmless either way).
+	if !s.dead {
+		s.flushPendingFree()
 	}
 	resp, err := s.send(req)
 	if err != nil {
@@ -740,7 +821,13 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		s.mu.Lock()
 		s.refsIssued++
 		s.mu.Unlock()
-		return &SageRef{be: s, id: id, san: san}, nil
+		ref := &SageRef{be: s, id: id, san: san}
+		// Per-ref lifecycle: when this Go handle becomes unreachable, free its
+		// server-side cache entry so the cache stays bounded to exactly the live
+		// Go refs — no statement-boundary materialize-all. The finalizer only
+		// queues the id (scheduleFree); the next roundtrip batch-clears it.
+		runtime.SetFinalizer(ref, func(r *SageRef) { r.be.scheduleFree(r.id) })
+		return ref, nil
 	}
 	if r, ok := m["poly"]; ok {
 		var str string
