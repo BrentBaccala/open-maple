@@ -7,9 +7,12 @@ entry: context, the decision, consequences, and the evidence that drove it.
 
 ## ADR-001 — Answer comparison and type predicates on the Sage side to keep big polynomials as refs
 
-**Status:** Accepted. Equality / is-zero implemented (commit `a3ab695`); type
-predicates implemented (commit `873baeb`). `canonicalKey` ordering and `subs`
-remain scoped follow-ups (see Consequences).
+**Status:** Accepted. Equality / is-zero (`a3ab695`), type predicates (`873baeb`),
+and variable `subs` (`83a2a5f`) implemented. `canonicalKey` ordering and printing
+remain scoped follow-ups (see Consequences). Note: a re-run after the equality
+fix showed `subs` jump from 5 to 51 materializations — it was *masked* before
+(equality collapsed the ref early), so fixing predicates surfaced `subs` as the
+real dominant transform; hence it was promoted from follow-up to implemented.
 
 ### Context
 
