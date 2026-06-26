@@ -534,10 +534,25 @@ func parseParam(par *tree) (name string, ptype *tree, pdefault *tree) {
 	return
 }
 
-// rememberKey builds a cache key from the argument values.
+// rememberKey builds a cache key from the argument values for `option remember`
+// memoization. A SageRef is keyed by its handle id (object identity) rather than
+// canonicalKey's materialize-and-stringify, so memoizing a proc on a multi-MB
+// polynomial argument (e.g. DT's MyNormal) does not pull the whole expression
+// across the wire and into a native AST just to build the key. This is safe and
+// correct: ref ids are monotonic and never reused (sage_server _NEXT_REF), so a
+// key never aliases a freed ref; two *distinct* refs with equal value get
+// distinct keys -- a remember miss, never a wrong answer -- which for the unique
+// giant remainders DT passes to MyNormal loses no real cache hits. (canonicalKey
+// itself must stay value-based: tableKey and the native-poly layer rely on equal
+// values producing equal keys.) The "\x01ref" prefix cannot collide with a
+// canonicalKey, which always starts with "@".
 func rememberKey(args []Value) string {
 	parts := make([]string, len(args))
 	for i, a := range args {
+		if r, ok := a.(*SageRef); ok {
+			parts[i] = fmt.Sprintf("\x01ref%d", r.id)
+			continue
+		}
 		parts[i] = canonicalKey(a)
 	}
 	return strings.Join(parts, "\x00")
