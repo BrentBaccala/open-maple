@@ -309,23 +309,25 @@ func newSageBackend() (*SageBackend, error) {
 	return b, nil
 }
 
+// unboundedTimeout is the sentinel for "no timeout": a duration so large the run
+// never reaches it. A resolved budget of 0 maps to this.
+const unboundedTimeout = time.Duration(1<<62 - 1)
+
 // envDurationSeconds reads an integer-seconds env var, falling back to def. A
-// value of 0 means "no timeout" (an effectively-unbounded wait), for the user
-// who would rather a genuinely-slow op block than abort.
+// resolved value of 0 — whether from def or from the env var — means "no timeout"
+// (an effectively-unbounded wait), for the user who would rather a genuinely-slow
+// op block than abort. A non-integer env value is ignored (def is used).
 func envDurationSeconds(name string, def time.Duration) time.Duration {
-	v := os.Getenv(name)
-	if v == "" {
-		return def
+	d := def
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			d = time.Duration(n) * time.Second
+		}
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
+	if d <= 0 {
+		return unboundedTimeout
 	}
-	if n <= 0 {
-		// Effectively unbounded: a very large duration the run will never reach.
-		return time.Duration(1<<62 - 1)
-	}
-	return time.Duration(n) * time.Second
+	return d
 }
 
 // heavyOps are compute-heavy CAS ops that operate on big polynomials: a slow call
