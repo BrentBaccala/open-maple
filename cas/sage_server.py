@@ -1673,6 +1673,21 @@ def op_neg(req):
     return _arith_enc(-vals[0])
 
 
+def op_is_zero(req):
+    """is_zero(a) / equal(a, b): True iff a (or a - b) is the zero element.
+    Answers an equation / is-zero condition server-side, so a ref operand is
+    resolved from the cache (decode_arg's {"ref"} path) and never shipped back as
+    a string just to test it -- this is the dominant ref->native collapse in the
+    DifferentialThomas control flow (truth() of `p = 0` inside if/and/or). Decoded
+    in the fraction field (matching the +/-/* arith ops), so a - b over polynomials
+    is exactly compareValues' expanded-normal-form equality on the Go side."""
+    vals, _F = _arith_decode(req)
+    v = vals[0]
+    for w in vals[1:]:
+        v = v - w
+    return {"bool": bool(v == 0)}
+
+
 def op_pow(req):
     """pow(base, e) — e a non-negative integer (poly^int). A negative exponent
     yields a fraction-field element, which the fraction-field ring handles."""
@@ -1761,6 +1776,11 @@ OPS = {
     "sub": op_sub,
     "mul": op_mul,
     "neg": op_neg,
+    # server-side equality / is-zero predicates: keep a big ref Sage-side instead
+    # of materializing it just to test an equation (the dominant ref->native
+    # collapse in DT control flow). Both route here; equal(a,b) == is_zero(a-b).
+    "is_zero": op_is_zero,
+    "equal": op_is_zero,
     "pow": op_pow,
     # CAS expression handles
     "materialize": op_materialize,

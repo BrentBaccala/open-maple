@@ -380,7 +380,51 @@ func sortValuesDefault(items []Value) {
 	})
 }
 
-// equalValues reports structural Maple-equality (used by =, member, set dedup).
+// equalValues reports structural Maple-equality (used by =, member, set dedup,
+// and truth() of `a = b` / `a <> b` conditions).
 func equalValues(a, b Value) bool {
+	if res, ok := refEqual(a, b); ok {
+		return res
+	}
 	return compareValues(a, b) == 0
+}
+
+// refEqual answers a = b on the Sage side when an operand is a LIVE (still
+// server-side) SageRef, so the possibly multi-MB polynomial is never
+// materialized just to test an equation / is-zero condition. This is the
+// dominant ref->native collapse in the DifferentialThomas control flow:
+// truth() of `p = 0` inside if/and/or. Equality is a - b == 0 in the fraction
+// field (op_is_zero), which matches compareValues' expanded-normal-form
+// polynomial equality. Returns ok=false (caller uses the native path) when no
+// live ref is involved, or the server call fails / returns a non-bool (e.g. an
+// operand that won't coerce into the ring) -- so correctness always falls back
+// to the materializing structural compare.
+func refEqual(a, b Value) (result bool, ok bool) {
+	be, live := liveRefBackend(a)
+	if !live {
+		be, live = liveRefBackend(b)
+	}
+	if !live {
+		return false, false
+	}
+	res, err := be.Call("equal", []Value{a, b})
+	if err != nil {
+		return false, false
+	}
+	if bl, isBool := res.(Boolean); isBool {
+		return bl.Kind == bTrue, true
+	}
+	return false, false
+}
+
+// liveRefBackend returns v's backend if v is an unmaterialized SageRef (its body
+// still lives Sage-side, so passing it as an op arg costs a {"ref":N} handle and
+// no materialization), else (nil, false).
+func liveRefBackend(v Value) (*SageBackend, bool) {
+	if r, ok := v.(*SageRef); ok {
+		if _, done := r.materialized(); !done {
+			return r.be, true
+		}
+	}
+	return nil, false
 }
