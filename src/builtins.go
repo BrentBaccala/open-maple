@@ -691,7 +691,55 @@ func biSubs(it *Interp, args []Value) (Value, error) {
 	for _, s := range subsArgs {
 		collectSubs(s, &pairs)
 	}
+	// Server-side fast path: substituting variables into a live ref is a ring
+	// substitution Sage can do on the cached poly, keeping it server-side instead
+	// of materializing the (possibly multi-MB) body. The dominant ref->native
+	// transform in DT reductions (ADR-001). Falls back for non-variable LHS or a
+	// non-coercible RHS (e.g. jet->diff()).
+	if v, ok := it.refSubs(expr, pairs); ok {
+		return v, nil
+	}
 	return substitute(expr, pairs), nil
+}
+
+// refSubs performs subs(expr, pairs) on the Sage side when expr is a LIVE
+// SageRef and every pair's LHS is a variable (Name/Indexed). Variable-only
+// substitution is exactly a ring substitution, matching native substitute's
+// single-pass first-match (op_subs is first-wins). Returns ok=false (caller uses
+// the materializing native path) when expr is not a live ref, any LHS is a
+// compound expression, or the server call fails (a non-coercible RHS raises).
+func (it *Interp) refSubs(expr Value, pairs [][2]Value) (Value, bool) {
+	be, live := liveRefBackend(expr)
+	if !live {
+		return nil, false
+	}
+	if len(pairs) == 0 {
+		return expr, true // no-op subs: keep the ref instead of materializing it
+	}
+	callArgs := make([]Value, 0, 1+2*len(pairs))
+	callArgs = append(callArgs, expr)
+	for _, p := range pairs {
+		if !isSubstVar(p[0]) {
+			return nil, false // compound LHS -> native syntactic subs
+		}
+		callArgs = append(callArgs, p[0], p[1])
+	}
+	res, err := be.Call("subs", callArgs)
+	if err != nil {
+		return nil, false
+	}
+	return res, true
+}
+
+// isSubstVar reports whether v is a substitution LHS that is a plain variable
+// (a name or a jet/indexed), for which Maple's syntactic subs and Sage's ring
+// substitution coincide.
+func isSubstVar(v Value) bool {
+	switch v.(type) {
+	case Name, *Indexed:
+		return true
+	}
+	return false
 }
 
 func collectSubs(s Value, pairs *[][2]Value) {

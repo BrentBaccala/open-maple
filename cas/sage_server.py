@@ -1688,6 +1688,25 @@ def op_is_zero(req):
     return {"bool": bool(v == 0)}
 
 
+def op_subs(req):
+    """subs(expr, lhs1, rhs1, lhs2, rhs2, ...) over a poly/rational ref. Each lhs
+    is a ring *variable* -- the Go side only routes here when every substitution
+    LHS is a variable, where Maple's syntactic subs coincides with ring
+    substitution. First-wins on a duplicate lhs, matching the native single-pass
+    substitute. A non-coercible lhs/rhs (e.g. a jet->diff() replacement, or a
+    variable absent from the ring) raises here and the Go side falls back to the
+    materializing native subs, so semantics are unchanged for those."""
+    vals, _F = _arith_decode(req)
+    expr = vals[0]
+    rest = vals[1:]
+    d = {}
+    for i in range(0, len(rest) - 1, 2):
+        k = rest[i]
+        if k not in d:  # first-wins: matches native substitute's first-match pass
+            d[k] = rest[i + 1]
+    return _arith_enc(expr.subs(d))
+
+
 def op_pow(req):
     """pow(base, e) — e a non-negative integer (poly^int). A negative exponent
     yields a fraction-field element, which the fraction-field ring handles."""
@@ -1781,6 +1800,10 @@ OPS = {
     # collapse in DT control flow). Both route here; equal(a,b) == is_zero(a-b).
     "is_zero": op_is_zero,
     "equal": op_is_zero,
+    # variable substitution on a ref, kept Sage-side (the dominant transform that
+    # materialized big refs in DT reductions). Go routes here only for all-variable
+    # LHS; compound-LHS / non-coercible-RHS subs fall back to native.
+    "subs": op_subs,
     "pow": op_pow,
     # CAS expression handles
     "materialize": op_materialize,
