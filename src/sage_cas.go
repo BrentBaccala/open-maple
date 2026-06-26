@@ -39,13 +39,19 @@ type SageBackend struct {
 	debug   bool
 	sageBin string
 	script  string
-	// timeout bounds an ordinary (cheap/structural) Sage call — it is a LIVENESS
-	// guard to detect a wedged/dead server, not a compute budget. heavyTimeout is
-	// the (much larger) bound for compute-heavy ops on big polynomials (arithmetic,
-	// pseudo-division, normal/factor/expand, indets, …): a slow-but-alive op on a
-	// multi-MB operand is normal, not a hang, and must be allowed to finish. See
-	// timeoutFor / heavyOps. Both are env-overridable (OPENMAPLE_SAGE_TIMEOUT,
-	// OPENMAPLE_SAGE_HEAVY_TIMEOUT, in seconds).
+	// timeout / heavyTimeout are per-op wall budgets. Both now default to 0
+	// (unbounded): the op timeout is OFF by default. Rationale: with useRefs on,
+	// essentially every heavy op carries a server-side ref, and roundtrip can never
+	// retry a ref-bearing request across a restart — so a timeout there does not
+	// recover anything, it only converts a slow-but-alive op into a dead,
+	// unrecoverable run (this killed the cell1+PDE hydrogen staging run: an lcoeff
+	// on a multi-MB operand blew the old 120 s liveness bound). An actual server
+	// *crash* is still caught instantly by send's read-error path (EOF/broken pipe),
+	// independent of any timeout; the timeout only ever guarded against a
+	// live-but-wedged server (rare), so removing it costs almost nothing. The knobs
+	// remain env-overridable (OPENMAPLE_SAGE_TIMEOUT, OPENMAPLE_SAGE_HEAVY_TIMEOUT,
+	// in seconds) for anyone who wants a finite liveness bound back; see
+	// timeoutFor / heavyOps.
 	timeout      time.Duration
 	heavyTimeout time.Duration
 	dead         bool
@@ -296,8 +302,8 @@ func newSageBackend() (*SageBackend, error) {
 		sageBin:      sageBin,
 		script:       script,
 		debug:        os.Getenv("OPENMAPLE_CAS_DEBUG") != "",
-		timeout:      envDurationSeconds("OPENMAPLE_SAGE_TIMEOUT", 120*time.Second),
-		heavyTimeout: envDurationSeconds("OPENMAPLE_SAGE_HEAVY_TIMEOUT", 3600*time.Second),
+		timeout:      envDurationSeconds("OPENMAPLE_SAGE_TIMEOUT", 0),
+		heavyTimeout: envDurationSeconds("OPENMAPLE_SAGE_HEAVY_TIMEOUT", 0),
 		useRefs:      os.Getenv("OPENMAPLE_DISABLE_REFS") == "",
 	}
 	return b, nil
