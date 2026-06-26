@@ -330,6 +330,20 @@ func biType(it *Interp, args []Value) (Value, error) {
 // checkTypeValue checks a value against a type given as a *value* (Name, String,
 // Func like list(symbol), Set of alternatives). Used by the type() builtin.
 func (it *Interp) checkTypeValue(v Value, typ Value) (bool, error) {
+	// A live SageRef's type can often be decided without materializing the
+	// (possibly multi-MB) polynomial: enc_poly only refs a genuinely large
+	// multi-term poly/rational (never a constant or small value), so a live ref
+	// is always a compound algebraic expression. The algebraic predicates
+	// (polynom/ratpoly/...) are then true and the numeric predicates false,
+	// regardless of the body. Only fires for a simple type NAME (parameterised /
+	// alternation types fall through, recursing back here for set alternatives).
+	if _, live := liveRefBackend(v); live {
+		if name, ok := simpleTypeName(typ); ok {
+			if res, handled := it.refTypeCheck(name); handled {
+				return res, nil
+			}
+		}
+	}
 	// Structural type predicates (type(p,`+`)/`*`/`^`/polynom/...) inspect the
 	// concrete expression, so a ref must be materialized first.
 	v = concrete(v)
@@ -361,6 +375,49 @@ func (it *Interp) checkTypeValue(v Value, typ Value) (bool, error) {
 	default:
 		return false, nil
 	}
+}
+
+// simpleTypeName extracts a bare type name from a Name/String type argument
+// (e.g. `polynom`, "integer"). Parameterised (list(symbol)), indexed, and
+// alternation (set) type forms return ok=false.
+func simpleTypeName(typ Value) (string, bool) {
+	switch t := typ.(type) {
+	case Name:
+		return t.Val, true
+	case MString:
+		return t.Val, true
+	}
+	return "", false
+}
+
+// refTypeCheck answers type(ref, name) for a LIVE SageRef without materializing,
+// when the result is fixed by the ref invariant. enc_poly never refs a constant
+// or small value, so a live ref always holds a genuinely large polynomial /
+// rational element that materialises to a compound *Sum/*Prod/*Power. Such a
+// value is algebraic (polynom/ratpoly/algebraic/anything -> true) and is never a
+// bare number (the numeric family -> false); both match the native checks on the
+// materialised value exactly. Form-dependent names (`+`/`*`/`^`), names with a
+// custom type/NAME proc, and everything else fall back to the materialising
+// check (handled=false), so behaviour is unchanged there.
+func (it *Interp) refTypeCheck(name string) (result bool, handled bool) {
+	// A user/DT-defined type/NAME proc overrides the builtin meaning; defer to it
+	// (mirrors checkNamedTypeV's precedence) rather than short-circuit.
+	if _, ok := it.typeProcs[name]; ok {
+		return false, false
+	}
+	if _, ok := it.lookup("type/" + name); ok {
+		return false, false
+	}
+	switch name {
+	case "polynom", "ratpoly", "algebraic", "anything":
+		return true, true
+	case "integer", "posint", "negint", "nonnegint", "posint0",
+		"nonnegative", "positive", "rational", "fraction", "numeric",
+		"realcons", "constant", "extended_numeric", "float", "infinity",
+		"even", "odd":
+		return false, true
+	}
+	return false, false
 }
 
 // checkNamedTypeV is checkNamedType but with value-form structured params.
