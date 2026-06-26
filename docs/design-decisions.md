@@ -7,8 +7,9 @@ entry: context, the decision, consequences, and the evidence that drove it.
 
 ## ADR-001 — Answer comparison and type predicates on the Sage side to keep big polynomials as refs
 
-**Status:** Accepted. Equality / is-zero implemented (commit `a3ab695`). Type
-predicates and `canonicalKey` ordering are scoped follow-ups (see Consequences).
+**Status:** Accepted. Equality / is-zero implemented (commit `a3ab695`); type
+predicates implemented (commit `873baeb`). `canonicalKey` ordering and `subs`
+remain scoped follow-ups (see Consequences).
 
 ### Context
 
