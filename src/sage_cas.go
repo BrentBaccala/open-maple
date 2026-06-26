@@ -155,6 +155,14 @@ func (r *SageRef) materialize() (Value, error) {
 			return
 		}
 		r.val = v
+		if refTrace {
+			// This is a ref->native collapse: ref r.id is now a Go-side AST and
+			// every later Sage op on it re-stringifies len(resp.Result) bytes.
+			// traceCallers names the inspection (op/nops/type/print/native-poly/
+			// comparison) that forced it.
+			fmt.Fprintf(stderrW(), "[ref-materialize] ref=%d bytes=%d via %s\n",
+				r.id, len(resp.Result), traceCallers(8))
+		}
 	})
 	return r.val, r.err
 }
@@ -692,6 +700,9 @@ func (s *SageBackend) Call(op string, args []Value) (Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	if mathTrace {
+		traceMathCall(op, member, reqArgs, v, len(resp.Result))
+	}
 	// indets returns a *set* in Maple (DT does set ops on it: `indets(p) minus
 	// {...}`, `intersect`). The server returns a list; convert to a Set.
 	if op == "indets" {
@@ -830,6 +841,12 @@ func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMes
 		// polynomial / rational / symbolic expression -> sanitized string
 		str := san.sanitizeExpr(v)
 		s.polyArgsSent++
+		if refTrace && len(str) >= refTracePolyMin {
+			// A big native AST is being marshalled+shipped as a string for this
+			// op — the per-op cost of an earlier [ref-materialize].
+			fmt.Fprintf(stderrW(), "[ref-polyarg] op=%s bytes=%d via %s\n",
+				op, len(str), traceCallers(8))
+		}
 		return json.Marshal(map[string]string{"poly": str})
 	}
 }
