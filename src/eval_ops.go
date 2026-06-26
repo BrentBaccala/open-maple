@@ -12,6 +12,14 @@ func (it *Interp) evalOperator(n *tree) (Value, error) {
 	if op == "$" {
 		return it.evalSeqOp(n)
 	}
+	// A '+'/'-' chain is flattened and simplified in one O(N) pass rather than
+	// folded pairwise via eval/arithAdd. Pairwise folding re-flattens and
+	// re-scans the whole growing partial sum at every nesting level (O(N^2)) and
+	// recurses N-deep down the operator spine; on a ~10^5-term polynomial
+	// intermediate that is hours of big.Rat churn and a giant goroutine stack.
+	if (op == "+" || op == "-") && len(n.nodes) == 2 {
+		return it.evalAddChain(n)
+	}
 	left, err := it.eval(n.nodes[0])
 	if err != nil {
 		return nil, err
@@ -155,6 +163,82 @@ func (it *Interp) neg(v Value) Value {
 	}
 	// symbolic: -1 * v
 	return &Prod{Factors: []Value{newInt(-1), v}}
+}
+
+// evalAddChain evaluates a '+'/'-' operator chain in one linear pass. It
+// iteratively flattens the chain's operator spine (an explicit worklist, so a
+// chain of length N does not recurse N-deep in Go), evaluating each non-+/-
+// operand as a leaf and applying the running sign, then collapses the whole
+// term list with a single simplifySum.
+//
+// This replaces the pairwise fold (arithAdd at every '+' node) which is O(N^2):
+// each level re-runs sumTerms+simplifySum over the entire accumulated sum. The
+// fast path is exactly equivalent to the pairwise fold when every term is a
+// plain native scalar — simplifySum folds the same rationals in the same order
+// and drops the same zeros. It is NOT equivalent for terms that arithAdd treats
+// specially: unmaterialized SageRefs (added server-side, never materialized),
+// Lists (element-wise add), and Floats (numAdd folds float+rational pairs that
+// simplifySum leaves split). Any such term forces the exact pairwise fallback.
+func (it *Interp) evalAddChain(n *tree) (Value, error) {
+	type frame struct {
+		node *tree
+		neg  bool
+	}
+	stack := []frame{{n, false}}
+	var terms []Value
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		nd := f.node
+		if nd.group == operate && (nd.value == "+" || nd.value == "-") && len(nd.nodes) == 2 {
+			rneg := f.neg
+			if nd.value == "-" {
+				rneg = !f.neg
+			}
+			// Push right then left so the left operand pops first — terms are
+			// collected in source order (matching the pairwise fold's order).
+			stack = append(stack, frame{nd.nodes[1], rneg})
+			stack = append(stack, frame{nd.nodes[0], f.neg})
+			continue
+		}
+		v, err := it.eval(nd)
+		if err != nil {
+			return nil, err
+		}
+		if f.neg {
+			v = it.neg(v)
+		}
+		terms = append(terms, v)
+	}
+	fast := true
+	for i, t := range terms {
+		if hasRefOperand(t) { // live server-side ref: must add via casArith
+			fast = false
+			break
+		}
+		t = concrete(t)
+		terms[i] = t
+		if _, isF := t.(Float); isF {
+			fast = false
+			break
+		}
+		if _, isL := t.(List); isL {
+			fast = false
+			break
+		}
+	}
+	if fast {
+		return simplifySum(terms), nil
+	}
+	// Fallback: fold pairwise, preserving arithAdd's full semantics.
+	acc := terms[0]
+	for _, t := range terms[1:] {
+		var err error
+		if acc, err = it.arithAdd(acc, t); err != nil {
+			return nil, err
+		}
+	}
+	return acc, nil
 }
 
 func (it *Interp) arithAdd(a, b Value) (Value, error) {
