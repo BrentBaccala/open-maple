@@ -8,11 +8,17 @@ entry: context, the decision, consequences, and the evidence that drove it.
 ## ADR-001 — Answer comparison and type predicates on the Sage side to keep big polynomials as refs
 
 **Status:** Accepted. Equality / is-zero (`a3ab695`), type predicates (`873baeb`),
-and variable `subs` (`83a2a5f`) implemented. `canonicalKey` ordering and printing
-remain scoped follow-ups (see Consequences). Note: a re-run after the equality
-fix showed `subs` jump from 5 to 51 materializations — it was *masked* before
-(equality collapsed the ref early), so fixing predicates surfaced `subs` as the
-real dominant transform; hence it was promoted from follow-up to implemented.
+variable `subs` (`83a2a5f`), and `option remember` keying (`d1f28a1`) implemented.
+Printing and `compareValues`/sort ordering remain scoped follow-ups. Notes from
+the staged re-runs: (1) after the equality fix, `subs` jumped 5 → 51
+materializations — it was *masked* before (equality collapsed the ref early), so
+fixing predicates surfaced `subs` as the real dominant transform. (2) The single
+largest collapse turned out to be neither a predicate nor `subs` but DT's
+`MyNormal` (`option remember`) stringifying an 86 MB argument to build its memo
+key — fixed by keying refs on handle id (`rememberKey`). (3) The `subs` fix is
+correct but inert for DT's reduction, whose dominant substitution is
+`subs(Leader^Rank = 0, p)` — a compound-LHS syntactic truncation, not a variable
+substitution, so it (correctly) declines the server-side path.
 
 ### Context
 
