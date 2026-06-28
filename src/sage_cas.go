@@ -62,6 +62,14 @@ type SageBackend struct {
 	// request across a restart — both turning the old silent "unknown ref / cache 0
 	// entries" corruption into an honest, clearly-labelled error.
 	generation int
+	// clearEpoch counts full-cache clears (ClearCache — the statement-boundary
+	// CACHE.clear()). Unlike generation, which tracks server *restarts*, a clear
+	// empties the cache WITHOUT restarting the process, so a ref's generation
+	// still matches afterward even though its server entry is gone. Each SageRef
+	// records the clearEpoch it was issued in; encodeArg sends {"ref":N} only
+	// while both generation AND clearEpoch still match — so a still-live ref is
+	// preferred over its materialized string even after a Go-side materialize.
+	clearEpoch int
 	// useRefs enables the expression-handle optimization: poly/rational results
 	// are kept Sage-side and returned as {"ref":N} handles, materialized to a
 	// string only when the Go side must look inside. On by default; disable with
@@ -125,6 +133,7 @@ type SageRef struct {
 	be  *SageBackend
 	id  int
 	gen int        // server generation this ref was issued in (see SageBackend.generation)
+	ce  int        // clearEpoch this ref was issued in (see SageBackend.clearEpoch)
 	san *sanitizer // the sanitizer in effect when the ref was created (for parseBack)
 
 	once sync.Once
@@ -450,6 +459,13 @@ func (s *SageBackend) ClearCache() error {
 	if !resp.OK {
 		return fmt.Errorf("sage clear: %s", resp.Error)
 	}
+	// The server CACHE is now empty: every ref issued before this clear is gone
+	// server-side. Bump clearEpoch so encodeArg stops sending those handles and
+	// falls back to their materialized strings (or an honest error if a survivor
+	// was never materialized — which the clear-site invariant forbids).
+	s.mu.Lock()
+	s.clearEpoch++
+	s.mu.Unlock()
 	return nil
 }
 
@@ -810,11 +826,24 @@ func (s *SageBackend) encodeArgs(op, member string, args []Value, san *sanitizer
 func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMessage, error) {
 	switch n := v.(type) {
 	case *SageRef:
-		// If this ref has already been materialized (its server-side handle may
-		// since have been cleared at a statement boundary), send the concrete
-		// value as a string — sending the stale {"ref":N} would be a cache miss.
-		// Otherwise send the handle by-reference: the server resolves it from its
-		// cache and coerces into the op's ring, with no string serialization.
+		// Prefer the server-side handle whenever its cache entry is still live —
+		// i.e. no server restart (gen matches) AND no full ClearCache (clearEpoch
+		// matches) since the ref was issued. This holds EVEN IF the ref was already
+		// materialized Go-side for some inspection (op/nops/type/print/native): the
+		// materialize copied the value into Go but did NOT evict the server entry
+		// (op_materialize is a pure read; only clear/free/restart evict). Sending
+		// {"ref":N} lets the server resolve+coerce it from cache with no string
+		// (re)parse — for a multi-MB poly that is the difference between a cache
+		// read and re-parsing megabytes on every later op. (A Go-side materialize
+		// for indets that re-shipped the string thereafter is what drove the
+		// cell1+PDE RSS blow-up.)
+		if n.gen == s.generation && n.ce == s.clearEpoch {
+			s.refArgsSent++
+			return json.Marshal(map[string]int{"ref": n.id})
+		}
+		// The server entry is gone (restart or statement-boundary clear). If we
+		// materialized the value Go-side it survives as a string; otherwise the
+		// expression is genuinely unrecoverable — fail honestly.
 		if mv, ok := n.materialized(); ok {
 			return s.encodeArg(op, mv, san)
 		}
@@ -822,8 +851,8 @@ func (s *SageBackend) encodeArg(op string, v Value, san *sanitizer) (json.RawMes
 			return nil, fmt.Errorf("sage ref %d lost to a server restart (issued in generation %d, now %d); "+
 				"the server-side ref cache was emptied and this expression is unrecoverable", n.id, n.gen, s.generation)
 		}
-		s.refArgsSent++
-		return json.Marshal(map[string]int{"ref": n.id})
+		return nil, fmt.Errorf("sage ref %d lost to a cache clear (issued in clear-epoch %d, now %d) and was never materialized; "+
+			"this expression is unrecoverable", n.id, n.ce, s.clearEpoch)
 	case Integer:
 		return json.Marshal(map[string]string{"int": n.Val.String()})
 	case Name:
@@ -872,11 +901,11 @@ func (s *SageBackend) encodeExprlist(items []Value, san *sanitizer) (json.RawMes
 	elems := make([]json.RawMessage, len(items))
 	for i, it := range items {
 		if ref, ok := it.(*SageRef); ok {
-			if _, materialized := ref.materialized(); !materialized {
-				if ref.gen != s.generation {
-					return nil, fmt.Errorf("sage ref %d lost to a server restart (issued in generation %d, now %d); "+
-						"the server-side ref cache was emptied and this expression is unrecoverable", ref.id, ref.gen, s.generation)
-				}
+			// Prefer the live server handle (see encodeArg): send {"ref":N} while
+			// gen+clearEpoch still match, even if the ref was materialized Go-side.
+			// This is what stops indets([... bigpoly ...]) — and every following op
+			// on the element — from re-parsing a multi-MB string.
+			if ref.gen == s.generation && ref.ce == s.clearEpoch {
 				s.refArgsSent++
 				b, err := json.Marshal(map[string]int{"ref": ref.id})
 				if err != nil {
@@ -884,6 +913,16 @@ func (s *SageBackend) encodeExprlist(items []Value, san *sanitizer) (json.RawMes
 				}
 				elems[i] = b
 				continue
+			}
+			// Entry gone: fall back to the materialized string below, or fail
+			// honestly if the value was never pulled Go-side.
+			if _, materialized := ref.materialized(); !materialized {
+				if ref.gen != s.generation {
+					return nil, fmt.Errorf("sage ref %d lost to a server restart (issued in generation %d, now %d); "+
+						"the server-side ref cache was emptied and this expression is unrecoverable", ref.id, ref.gen, s.generation)
+				}
+				return nil, fmt.Errorf("sage ref %d lost to a cache clear (issued in clear-epoch %d, now %d) and was never materialized; "+
+					"this expression is unrecoverable", ref.id, ref.ce, s.clearEpoch)
 			}
 		}
 		b, err := json.Marshal(san.sanitizeExpr(it))
@@ -946,8 +985,9 @@ func (s *SageBackend) decodeResult(op string, raw json.RawMessage, san *sanitize
 		s.mu.Lock()
 		s.refsIssued++
 		gen := s.generation
+		ce := s.clearEpoch
 		s.mu.Unlock()
-		ref := &SageRef{be: s, id: id, gen: gen, san: san}
+		ref := &SageRef{be: s, id: id, gen: gen, ce: ce, san: san}
 		// Per-ref lifecycle: when this Go handle becomes unreachable, free its
 		// server-side cache entry so the cache stays bounded to exactly the live
 		// Go refs — no statement-boundary materialize-all. The finalizer only
