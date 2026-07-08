@@ -761,14 +761,56 @@ func collectSubs(s Value, pairs *[][2]Value) {
 	}
 }
 
+// subsCanMatch is a cheap structural screen for substitute's per-node equality
+// test. Maple's subs is *syntactic* substitution: a Sum/Prod/Power subtree can
+// only match a target of the same kind, and never matches an atom (Maple does
+// no cancellation matching — u+w-w is auto-simplified before subs ever sees
+// it). equalValues, by contrast, is mathematical: comparing a compound subtree
+// against an atomic target rebuilds the whole subtree's polynomial normal form
+// (toPolyNF) just to say "not equal". On the hydrogen ansatz that chain —
+// substitute → equalValues → comparePolyValues → toPolyNF — was ~1/3 of all
+// CPU and ~90% of allocations, because DT's substitution targets are almost
+// always atomic jet variables compared against every subtree of a large
+// polynomial. Screening cross-kind pairs here skips the normal-form work while
+// keeping full order-independent equality for same-kind pairs (a Sum target in
+// a different term order still matches). OPENMAPLE_SUBS_MATH_EQ=1 restores the
+// unscreened behavior (bisection switch).
+func subsCanMatch(expr, target Value) bool {
+	// A ref-backed target's kind is unknown without materializing it — let
+	// equalValues (which materializes) decide. expr is already concrete.
+	if _, isRef := target.(*SageRef); isRef {
+		return true
+	}
+	switch expr.(type) {
+	case *Sum:
+		_, ok := target.(*Sum)
+		return ok
+	case *Prod:
+		_, ok := target.(*Prod)
+		return ok
+	case *Power:
+		_, ok := target.(*Power)
+		return ok
+	}
+	switch target.(type) {
+	case *Sum, *Prod, *Power:
+		return false
+	}
+	return true
+}
+
+var subsMathEq = os.Getenv("OPENMAPLE_SUBS_MATH_EQ") == "1"
+
 func substitute(expr Value, pairs [][2]Value) Value {
 	// A ref must be materialized before substitution walks its structure —
 	// otherwise subs silently no-ops on the opaque handle (which would, e.g.,
 	// leave DT's JetList2Diff jet->diff replacement unapplied).
 	expr = concrete(expr)
 	for _, p := range pairs {
-		if equalValues(expr, p[0]) {
-			return p[1]
+		if subsMathEq || subsCanMatch(expr, p[0]) {
+			if equalValues(expr, p[0]) {
+				return p[1]
+			}
 		}
 	}
 	switch x := expr.(type) {

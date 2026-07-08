@@ -9,13 +9,57 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"runtime/pprof"
 )
 
 func main() {
+	stopProfiles := startProfiles()
 	if len(os.Args) > 1 {
-		os.Exit(runFile(os.Args[1]))
+		code := runFile(os.Args[1])
+		stopProfiles()
+		os.Exit(code)
 	}
 	execPrint()
+	stopProfiles()
+}
+
+// startProfiles turns on pprof profiling when requested via the environment:
+// OPENMAPLE_CPUPROFILE=<file> and/or OPENMAPLE_MEMPROFILE=<file>. Returns a
+// stop function that finalizes the profiles; it must run before os.Exit.
+func startProfiles() func() {
+	stop := func() {}
+	if path := os.Getenv("OPENMAPLE_CPUPROFILE"); path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cpuprofile: "+err.Error())
+		} else if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintln(os.Stderr, "cpuprofile: "+err.Error())
+			f.Close()
+		} else {
+			stop = func() {
+				pprof.StopCPUProfile()
+				f.Close()
+			}
+		}
+	}
+	if path := os.Getenv("OPENMAPLE_MEMPROFILE"); path != "" {
+		cpuStop := stop
+		stop = func() {
+			cpuStop()
+			f, err := os.Create(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "memprofile: "+err.Error())
+				return
+			}
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintln(os.Stderr, "memprofile: "+err.Error())
+			}
+			f.Close()
+		}
+	}
+	return stop
 }
 
 // runFile reads a Maple program from path and executes it. The program loads any
