@@ -417,17 +417,72 @@ tests/run_examples.sh --log FILE # stream to FILE (default: $TASK_LIVE_LOG or te
 Expected: ex1_singular_ode → 2, ex2_params → 3 labeled parts, ex3_ode1d → 13,
 ex4_hydrogen → 29. ex1b_discover is a typing/accessor probe (smoke run, no count).
 
+## Performance: the subs equality screen (hydrogen 813 s → 327 s)
+
+The "interpreter-CPU-bound, open-ended Go perf work" frontier below was
+profiled properly (pprof via `OPENMAPLE_CPUPROFILE`/`OPENMAPLE_MEMPROFILE`
+env hooks in `main.go`) and turned out to have one dominant cause. On
+ex4_hydrogen (813.5 s, 29 cells, ~100% Go CPU, ~100 GB total allocations):
+
+- `substitute` (Maple `subs`) ran `equalValues(node, target)` at every node of
+  its recursive walk; `compareValues` is polynomial-aware, so comparing a
+  compound subtree against DT's (almost always atomic) substitution target
+  rebuilt the subtree's full polynomial normal form — `toPolyNF` +
+  `polyNF.mul/add` maps with string monomial keys — just to answer "not
+  equal". That chain was **33% of CPU directly and ~90% of all allocations**,
+  and the allocation churn made GC scan/mark another **~39% of CPU**.
+
+Fix: `subsCanMatch` (builtins.go) — a structural kind screen before
+`equalValues`. Maple's `subs` is *syntactic*, so a Sum/Prod/Power can only
+match a target of the same kind and never an atom; cross-kind pairs skip the
+normal-form comparison entirely. Same-kind pairs keep full order-independent
+equality. `OPENMAPLE_SUBS_MATH_EQ=1` restores the old behavior;
+`OPENMAPLE_SUBS_SCREEN_CHECK=1` logs any pair the screen would reject that
+mathematical equality would have matched (the debugging harness that found
+the two normalization bugs below).
+
+The screen initially hung TestDecompositionSmoke because two classes of
+**unnormalized values** made equal pairs differ in kind — both fixed at the
+construction site, as Maple auto-simplification (eval_ops.go):
+
+- `neg` built `Prod{-1, v}` raw, so `-(-v)` nested (`--u[0,0]^2`); now routed
+  through `simplifyProd` (which also flattens nested Prod/Sum via worklist).
+- `arithPow` kept symbolic `a^1`/`a^0` as Power nodes (`Leader^Rank` with
+  rank 1 → `Power{x,1}`, kind-unequal to the atom `x`); now collapse to
+  `a` / `1`.
+
+Measured on ex4_hydrogen (samsung, quiet machine, 29 cells every time,
+decomposition output bit-identical to baseline). The worksheet's own
+"in NNNs" figure is `time()` = process CPU seconds (getrusage), not wall:
+
+| build | GOGC | time() (CPU s) | wall | peak RSS |
+|---|---|---|---|---|
+| baseline | default | 813.5 | 14:55 | 160 MB |
+| baseline | 1000 | 589.0 | (run was contended; indicative) | 533 MB |
+| subs screen + normalizations | default | 326.6 | 5:05 | 117 MB |
+| subs screen + normalizations | 1000 | **182.0** | **4:53** | 531 MB |
+
+Wall 895 s → 293 s (~3×). Post-fix the process is only ~60% CPU-busy
+(169 s user in 293 s wall): the residual is increasingly **Sage round-trip
+wait**, so the "interpreter-bound" frontier below is no longer absolute.
+
+Full Sage suite (89 tests) green, also under `OPENMAPLE_VERIFY_NATIVE=1`.
+
 ## Remaining frontiers (characterized, none a clear quick win)
 
-1. **High-order / large systems are interpreter-CPU-bound, not CAS-bound.** Now
-   that native `evala` removed the last big Sage round-trip, the **hydrogen**
-   case (18 min, ~2040 s CPU) is the canonical example: its time is the Go
-   interpreter executing DT's prolongation logic, not the CAS. Same story for the
-   Juri–Vladimir example (`u[1,1,3]-u[4,0,0], u[5,1,0]-u[0,4,0], u[0,6,0],
-   u[4,2,0]`, 3 ivar), which makes only ~92 Sage calls in 65 s. A CPU profile of
-   the 3-var shows allocation/GC (`mallocgc`, `scanobject`) and the Sage-Call
-   encode/decode path as the top consumers. Speeding this up means **reducing
-   interpreter allocations** (open-ended Go perf work), not faster CAS.
+1. **High-order / large systems: interpreter CPU, with named next levers.**
+   The post-fix profile (159 s CPU run) says the next win is **memoizing
+   polyNF on `*Sum`/`*Prod`/`*Power` nodes**: `toPolyNF` is still 45% of CPU
+   (cum), now driven by `memberOp` (45%), the remaining same-kind `substitute`
+   comparisons (31%), and `truth` (23%) — all recomputing normal forms of the
+   same immutable values. Behind that: the polyNF representation itself
+   (string monomial keys via `monoKey`, three maps per poly), the proc-call
+   path (`callProcWB` allocates 3 maps per call and re-walks the declaration
+   AST — `isLocal`/`isGlobal` are static per proc and could be precomputed at
+   proc construction), and `parseNumber` re-parsing constant AST tokens on
+   every eval (memoizable on the immutable `tree` node). `GOGC=1000` is a
+   free further ~25% CPU at ~5× RSS (still tiny); post-fix the process is
+   only ~60% CPU-busy, so Sage round-trip wait is back on the table too.
 
 2. **Composite `numer`/`denom`/`normal`, `factors`, and multivariate `gcd` still
    round-trip to Sage.** `content` and the univariate / integer-constant slice of
