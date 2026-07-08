@@ -800,6 +800,7 @@ func subsCanMatch(expr, target Value) bool {
 }
 
 var subsMathEq = os.Getenv("OPENMAPLE_SUBS_MATH_EQ") == "1"
+var subsScreenCheck = os.Getenv("OPENMAPLE_SUBS_SCREEN_CHECK") == "1"
 
 func substitute(expr Value, pairs [][2]Value) Value {
 	// A ref must be materialized before substitution walks its structure —
@@ -807,6 +808,10 @@ func substitute(expr Value, pairs [][2]Value) Value {
 	// leave DT's JetList2Diff jet->diff replacement unapplied).
 	expr = concrete(expr)
 	for _, p := range pairs {
+		if subsScreenCheck && !subsCanMatch(expr, p[0]) && equalValues(expr, p[0]) {
+			fmt.Fprintf(os.Stderr, "[subs-screen-miss] expr=%s target=%s\n",
+				printValue(expr), printValue(p[0]))
+		}
 		if subsMathEq || subsCanMatch(expr, p[0]) {
 			if equalValues(expr, p[0]) {
 				return p[1]

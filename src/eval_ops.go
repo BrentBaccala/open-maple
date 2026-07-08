@@ -161,8 +161,11 @@ func (it *Interp) neg(v Value) Value {
 		}
 		return List{out}
 	}
-	// symbolic: -1 * v
-	return &Prod{Factors: []Value{newInt(-1), v}}
+	// symbolic: -1 * v, via simplifyProd so the sign folds into an existing
+	// leading coefficient and -(-v) collapses to v (Maple auto-simplification;
+	// a surviving double negation is invisible in most printed forms and
+	// broke subsCanMatch's kind screen).
+	return simplifyProd(append([]Value{newInt(-1)}, prodFactors(v)...))
 }
 
 // evalAddChain evaluates a '+'/'-' operator chain in one linear pass. It
@@ -389,6 +392,17 @@ func (it *Interp) arithPow(a, b Value) (Value, error) {
 			return normRat(res), nil
 		}
 	}
+	// Maple auto-simplification: a^1 -> a, a^0 -> 1 (numeric bases were handled
+	// above; this keeps a symbolic Leader^Rank with rank 1 from producing a
+	// Power{x,1} that compares unequal-by-kind to the atom x).
+	if bi, ok := b.(Integer); ok && bi.Val.IsInt64() {
+		switch bi.Val.Int64() {
+		case 0:
+			return newInt(1), nil
+		case 1:
+			return a, nil
+		}
+	}
 	return &Power{Base: a, Exp: b}, nil
 }
 
@@ -527,7 +541,16 @@ func simplifySum(terms []Value) Value {
 
 	var num *big.Rat
 	var rest []Value
-	for _, t := range terms {
+	// Worklist so a nested *Sum term (e.g. a substituted value) flattens into
+	// this sum, as Maple's n-ary + auto-simplification would.
+	work := terms
+	for len(work) > 0 {
+		t := work[0]
+		work = work[1:]
+		if s, ok := t.(*Sum); ok {
+			work = append(append([]Value{}, s.Terms...), work...)
+			continue
+		}
 		if r, ok := toRat(t); ok {
 			if num == nil {
 				num = new(big.Rat).Set(r)
@@ -556,7 +579,16 @@ func simplifySum(terms []Value) Value {
 func simplifyProd(factors []Value) Value {
 	var coef *big.Rat
 	var rest []Value
-	for _, f := range factors {
+	// Worklist so a nested *Prod factor (e.g. from neg or a substituted value)
+	// flattens into this product, as Maple's n-ary * auto-simplification would.
+	work := factors
+	for len(work) > 0 {
+		f := work[0]
+		work = work[1:]
+		if p, ok := f.(*Prod); ok {
+			work = append(append([]Value{}, p.Factors...), work...)
+			continue
+		}
 		if r, ok := toRat(f); ok {
 			if coef == nil {
 				coef = new(big.Rat).Set(r)
